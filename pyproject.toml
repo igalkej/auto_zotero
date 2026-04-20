@@ -1,0 +1,110 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zotai"
+version = "0.1.0.dev0"
+description = "Zotero AI toolkit — retroactive import, prospective capture, and MCP access for academic libraries."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "zotero-ai-toolkit contributors" }]
+keywords = ["zotero", "reference-manager", "ocr", "llm", "mcp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+
+dependencies = [
+    # CLI + config
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "pyyaml>=6.0",
+    # Persistence
+    "sqlmodel>=0.0.22",
+    "alembic>=1.13",
+    # HTTP + retries
+    "httpx>=0.27",
+    "tenacity>=8.5",
+    # Observability
+    "structlog>=24.1",
+    # PDF + metadata
+    "pdfplumber>=0.11",
+    "ocrmypdf>=16.0",
+    "rapidfuzz>=3.9",
+    # External APIs
+    "pyzotero>=1.5",
+    "openai>=1.40",
+]
+
+[project.optional-dependencies]
+s2 = [
+    "fastapi>=0.112",
+    "uvicorn[standard]>=0.30",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "feedparser>=6.0",
+    "apscheduler>=3.10",
+    "chromadb>=0.5",
+]
+dev = [
+    "pytest>=8.2",
+    "pytest-cov>=5.0",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+    "mypy>=1.11",
+    "ruff>=0.5",
+    "types-PyYAML>=6.0",
+]
+
+[project.scripts]
+zotai = "zotai.cli:app"
+
+[project.urls]
+Repository = "https://github.com/igalkej/auto_zotero"
+Issues = "https://github.com/igalkej/auto_zotero/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zotai"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/zotai"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["pdfplumber.*", "ocrmypdf.*", "pyzotero.*", "feedparser.*", "chromadb.*", "apscheduler.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["src/zotai"]
+branch = true
+omit = ["*/dashboard/*", "*/__init__.py"]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_covered = false

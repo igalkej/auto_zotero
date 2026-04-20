@@ -1,1 +1,63 @@
+# WSL artifacts
 *:Zone.Identifier
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+.installed.cfg
+
+# Virtualenvs
+.venv/
+venv/
+ENV/
+
+# uv
+.uv/
+
+# Environments and secrets
+.env
+.env.*
+!.env.example
+
+# IDEs / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Testing / typing
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Project runtime state (mounted as Docker volumes)
+workspace/
+staging/
+reports/
+state.db
+state.db-*
+candidates.db
+candidates.db-*
+chroma_db/
+
+# Alembic artefacts
+alembic/versions/__pycache__/
+
+# OS misc
+Thumbs.db
+
+# Local overrides
+docker-compose.override.yml

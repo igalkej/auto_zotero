@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Scaffolding** (#1): initial project skeleton — `pyproject.toml` with uv/hatchling,
+  multi-stage `Dockerfile`, `docker-compose.yml` with `onboarding` and `dashboard`
+  services, `.env.example`, Alembic config with an empty migrations directory,
+  source package tree (`src/zotai/{s1,s2,s2/dashboard,api,utils}`), test harness
+  (`tests/conftest.py`, per-subsystem test packages), config templates
+  (`config/{taxonomy,feeds,scoring}.yaml`, feeds all `active: false`),
+  `scripts/healthcheck.py`, MIT `LICENSE`.
+
 ### Changed
 
 - **Spec**: `docs/plan_02_subsystem2.md` §10 — replaced the single-line PDF

@@ -1,0 +1,67 @@
+# ─────────────────────────────────────────────────────────────
+# config/feeds.yaml — RSS feeds consumed by S2.
+#
+# All feeds start with `active: false` so the worker doesn't hit any
+# external service until the user has reviewed the list. Flip individual
+# feeds to `active: true` (or edit them via `/config/feeds` in the
+# dashboard once Phase 12 lands) before the first fetch cycle.
+# See docs/plan_02_subsystem2.md §6 for the schema.
+# ─────────────────────────────────────────────────────────────
+feeds:
+  - id: aer
+    name: "American Economic Review"
+    rss_url: "https://www.aeaweb.org/journals/aer/rss"
+    issn: "0002-8282"
+    active: false
+
+  - id: jep
+    name: "Journal of Economic Perspectives"
+    rss_url: "https://www.aeaweb.org/journals/jep/rss"
+    issn: "0895-3309"
+    active: false
+
+  - id: qje
+    name: "Quarterly Journal of Economics"
+    rss_url: "https://academic.oup.com/rss/site_5341/3359.xml"
+    issn: "0033-5533"
+    active: false
+
+  - id: jpe
+    name: "Journal of Political Economy"
+    rss_url: "https://www.journals.uchicago.edu/action/showFeed?type=etoc&feed=rss&jc=jpe"
+    issn: "0022-3808"
+    active: false
+
+  - id: restud
+    name: "Review of Economic Studies"
+    rss_url: "https://academic.oup.com/rss/site_5395/3464.xml"
+    issn: "0034-6527"
+    active: false
+
+  - id: ecma
+    name: "Econometrica"
+    rss_url: "https://onlinelibrary.wiley.com/feed/14680262/most-recent"
+    issn: "0012-9682"
+    active: false
+
+  - id: jde
+    name: "Journal of Development Economics"
+    rss_url: "https://www.sciencedirect.com/science/journal/03043878/rss"
+    issn: "0304-3878"
+    active: false
+
+  - id: wdev
+    name: "World Development"
+    rss_url: "https://www.sciencedirect.com/science/journal/0305750X/rss"
+    issn: "0305-750X"
+    active: false
+
+  - id: cepal-review
+    name: "CEPAL Review"
+    rss_url: "https://www.cepal.org/rss/cepal-review.xml"
+    active: false
+
+  - id: nber-new-papers
+    name: "NBER Working Papers (new)"
+    rss_url: "https://www.nber.org/rss/new.xml"
+    active: false
