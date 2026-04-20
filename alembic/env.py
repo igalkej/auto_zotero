@@ -1,10 +1,10 @@
 """Alembic migration environment.
 
-Phase 0 stub: `target_metadata` is `None` because `zotai.state` is introduced
-in Phase 1 (#2). Once the SQLModel models land, replace `target_metadata = None`
-with:
-
-    from zotai.state import metadata as target_metadata
+`target_metadata` is `zotai.state.metadata`, which carries both S1 and S2
+tables. Alembic targets `state.db` (S1) by default per `alembic.ini`'s
+`sqlalchemy.url`; S2 tables are created directly by `zotai.state.init_s2`
+at dashboard startup rather than via migrations in v1. See plan_01 §4 and
+plan_02 §5.
 
 `render_as_batch=True` keeps SQLite compatible with column-drop migrations.
 """
@@ -16,12 +16,12 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from zotai.state import metadata as target_metadata  # noqa: E402
+
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
-
-target_metadata = None
 
 
 def run_migrations_offline() -> None:
