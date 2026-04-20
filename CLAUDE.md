@@ -111,13 +111,6 @@ zotero-ai-toolkit/
 ├── docker-compose.yml
 ├── Dockerfile
 │
-├── plan_00_overview.md          # arquitectura general
-├── plan_01_subsystem1.md        # captura retroactiva
-├── plan_02_subsystem2.md        # captura prospectiva
-├── plan_03_subsystem3.md        # acceso MCP
-├── plan_taxonomy.md             # taxonomía de tags
-├── plan_glossary.md             # glosario
-│
 ├── src/
 │   └── zotai/
 │       ├── __init__.py
@@ -167,6 +160,12 @@ zotero-ai-toolkit/
 │   └── fixtures/
 │
 ├── docs/
+│   ├── plan_00_overview.md      # arquitectura general
+│   ├── plan_01_subsystem1.md    # captura retroactiva
+│   ├── plan_02_subsystem2.md    # captura prospectiva
+│   ├── plan_03_subsystem3.md    # acceso MCP
+│   ├── plan_taxonomy.md         # taxonomía de tags
+│   ├── plan_glossary.md         # glosario
 │   ├── setup-windows.md
 │   ├── setup-linux.md
 │   ├── troubleshooting.md

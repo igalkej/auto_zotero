@@ -120,10 +120,10 @@ Listado en `CLAUDE.md`. Resumen: no es PRISMA, no es PKM, no es citation network
 ## 9. Lectura ordenada para onboarding
 
 1. `CLAUDE.md` (reglas operativas)
-2. `plan_00_overview.md` (este documento)
-3. `plan_glossary.md` (términos canónicos)
-4. `plan_taxonomy.md` (clasificación de items)
-5. `plan_01_subsystem1.md` (primer subsistema a construir)
-6. `plan_03_subsystem3.md` (segundo, tras S1)
-7. `plan_02_subsystem2.md` (tercero, tras S1+S3)
+2. `docs/plan_00_overview.md` (este documento)
+3. `docs/plan_glossary.md` (términos canónicos)
+4. `docs/plan_taxonomy.md` (clasificación de items)
+5. `docs/plan_01_subsystem1.md` (primer subsistema a construir)
+6. `docs/plan_03_subsystem3.md` (segundo, tras S1)
+7. `docs/plan_02_subsystem2.md` (tercero, tras S1+S3)
 8. `docs/decisions/*.md` (contexto de decisiones históricas)
