@@ -1,0 +1,49 @@
+# docker-compose.yml — entry point for users.
+#
+# Services:
+#   - onboarding : one-shot S1 pipeline runner (profile "onboarding")
+#   - dashboard  : long-running S2 FastAPI app + scheduled worker
+#
+# Volumes persist across runs:
+#   - ./workspace : state.db, candidates.db, staging/, reports/, chroma_db/
+#   - ./config    : feeds.yaml, taxonomy.yaml, scoring.yaml
+#   - ./data      : source PDFs (read-only for the container)
+
+services:
+  onboarding:
+    build: .
+    image: zotai:latest
+    profiles: ["onboarding"]
+    env_file: .env
+    volumes:
+      - ./workspace:/workspace
+      - ./config:/app/config
+      - ./data:/data:ro
+    # Note: host networking keeps Zotero local-API reachable at
+    # http://localhost:23119 from inside the container on Linux. On macOS/Windows
+    # the container talks to `host.docker.internal` — override in .env:
+    #   ZOTERO_LOCAL_API_HOST=http://host.docker.internal:23119
+    network_mode: host
+    command: ["zotai", "s1", "--help"]
+    # Onboarding is interactive and short-lived: no healthcheck needed.
+    healthcheck:
+      disable: true
+
+  dashboard:
+    build: .
+    image: zotai:latest
+    env_file: .env
+    volumes:
+      - ./workspace:/workspace
+      - ./config:/app/config
+    ports:
+      - "127.0.0.1:8000:8000"
+    network_mode: host
+    command: ["uvicorn", "zotai.s2.dashboard.main:app", "--host", "127.0.0.1", "--port", "8000"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "/app/scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

@@ -1,0 +1,141 @@
+# ─────────────────────────────────────────────────────────────
+# config/taxonomy.yaml — TEMA + METODO tag taxonomy.
+#
+# ⚠️  TEMPLATE — MUST BE CUSTOMIZED BEFORE Phase 6 (`zotai s1 tag`).
+# The values below are the suggested defaults from `docs/plan_taxonomy.md`
+# for an economics / LATAM social-sciences corpus. Adapt them to match your
+# actual research profile, then change `status` below from `template` to
+# `customized`. `zotai s1 tag` refuses to run while `status: template`.
+# See docs/plan_taxonomy.md §7 for the user TODO checklist.
+# ─────────────────────────────────────────────────────────────
+version: 1
+status: template
+
+tema:
+  # Macro
+  - id: macro-crecimiento
+    description: "Determinantes del crecimiento económico de largo plazo"
+    synonyms: ["growth", "crecimiento", "desarrollo económico"]
+  - id: macro-ciclos
+    description: "Fluctuaciones de corto plazo, recesiones, expansiones"
+    synonyms: ["business cycles", "ciclos económicos"]
+  - id: macro-inflacion
+    description: "Inflación, expectativas, pass-through"
+    synonyms: ["inflation", "CPI"]
+  - id: macro-monetaria
+    description: "Política monetaria, banca central"
+    synonyms: ["monetary policy", "central banking"]
+  - id: macro-fiscal
+    description: "Política fiscal, gasto, impuestos, multiplicadores"
+    synonyms: ["fiscal policy", "taxation", "government spending"]
+  - id: macro-deuda
+    description: "Deuda pública, sostenibilidad, default"
+    synonyms: ["public debt", "sovereign debt", "default"]
+
+  # Meso / sectores
+  - id: comercio-internacional
+    description: "Comercio, aranceles, cadenas globales de valor"
+    synonyms: ["trade", "tariffs", "global value chains"]
+  - id: sistema-financiero
+    description: "Bancos, crédito, crisis financieras"
+    synonyms: ["financial system", "banking", "credit"]
+  - id: mercado-laboral
+    description: "Empleo, salarios, desempleo, oferta/demanda de trabajo"
+    synonyms: ["labor market", "wages", "unemployment"]
+  - id: informalidad
+    description: "Empleo informal, economía informal"
+    synonyms: ["informality", "informal economy"]
+  - id: desarrollo-productivo
+    description: "Política industrial, productividad, diversificación"
+    synonyms: ["industrial policy", "productivity"]
+
+  # Micro / hogares
+  - id: pobreza
+    description: "Medición y determinantes de la pobreza"
+    synonyms: ["poverty"]
+  - id: desigualdad
+    description: "Distribución del ingreso, movilidad"
+    synonyms: ["inequality", "distribution"]
+  - id: educacion
+    description: "Educación, retornos, calidad"
+    synonyms: ["education", "schooling", "human capital"]
+  - id: salud
+    description: "Economía de la salud, sistemas, outcomes"
+    synonyms: ["health economics"]
+  - id: genero
+    description: "Economía de género, brechas"
+    synonyms: ["gender"]
+
+  # Instituciones y gobernanza
+  - id: instituciones
+    description: "Rol de las instituciones en el desarrollo"
+    synonyms: ["institutions"]
+  - id: corrupcion
+    description: "Corrupción, rent-seeking"
+    synonyms: ["corruption"]
+  - id: capacidad-estatal
+    description: "State capacity, burocracia"
+    synonyms: ["state capacity", "bureaucracy"]
+
+  # Ambiente
+  - id: cambio-climatico
+    description: "Cambio climático, políticas de mitigación/adaptación"
+    synonyms: ["climate change", "mitigation"]
+  - id: recursos-naturales
+    description: "Recursos naturales, resource curse"
+    synonyms: ["natural resources", "resource curse"]
+
+  # Metodológica-temáticos
+  - id: demografia
+    description: "Población, fertilidad, envejecimiento"
+    synonyms: ["demography", "demographics"]
+  - id: migracion
+    description: "Migración, efectos sobre origen/destino"
+    synonyms: ["migration"]
+  - id: tecnologia-digitalizacion
+    description: "Tecnología, digitalización, automatización"
+    synonyms: ["technology", "digitalization", "automation"]
+
+metodo:
+  # Empíricos
+  - id: empirico-rct
+    description: "Randomized controlled trials / experimentos aleatorizados"
+    synonyms: ["RCT", "experimento", "randomized"]
+  - id: empirico-quasi-exp
+    description: "Diff-in-diff, RDD, IV, synthetic control"
+    synonyms: ["quasi-experimental", "diff-in-diff", "RDD", "IV"]
+  - id: empirico-obs
+    description: "Panel, series de tiempo, cross-section simple"
+    synonyms: ["observational", "panel", "cross-section"]
+  - id: empirico-estructural
+    description: "Modelos estructurales estimados"
+    synonyms: ["structural estimation"]
+
+  # Teóricos / computacionales
+  - id: teorico-analitico
+    description: "Modelos puramente formales"
+    synonyms: ["theoretical", "analytical model"]
+  - id: simulacion
+    description: "DSGE, ABM, microsimulación"
+    synonyms: ["simulation", "DSGE", "ABM"]
+
+  # Síntesis
+  - id: meta-analisis
+    description: "Meta-análisis"
+    synonyms: ["meta-analysis"]
+  - id: revision-literatura
+    description: "Revisión de literatura (narrativa o sistemática)"
+    synonyms: ["literature review", "survey"]
+
+  # Cualitativos
+  - id: narrativo-historico
+    description: "Análisis narrativo, histórico"
+    synonyms: ["historical", "narrative"]
+  - id: caso-estudio
+    description: "Estudios de caso"
+    synonyms: ["case study"]
+
+  # Policy
+  - id: policy-analysis
+    description: "Análisis normativo, orientado a política pública"
+    synonyms: ["policy analysis"]

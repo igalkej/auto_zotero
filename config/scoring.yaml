@@ -1,0 +1,24 @@
+# ─────────────────────────────────────────────────────────────
+# config/scoring.yaml — default weights for the S2 composite score.
+# Defaults match docs/plan_02_subsystem2.md §7.4.
+# Adjust via the dashboard at /config/weights once Phase 12 lands.
+# ─────────────────────────────────────────────────────────────
+version: 1
+
+weights:
+  tags: 1.0
+  semantic: 2.0
+  queries: 2.0
+
+tag_scoring:
+  # Whether to use the LLM-based tag extractor (better) or plain keyword
+  # matching (cheaper). The keyword fallback is useful when the OpenAI
+  # budget is tight; see plan_02 §7.1 alternative.
+  mode: llm   # llm | keywords
+  top_k_user_tags: 30
+
+semantic_scoring:
+  top_k_corpus: 20
+  # Returned when ChromaDB is missing or empty, so the composite is still
+  # defined instead of silently dropping to 0 (see plan_02 §7.2).
+  neutral_fallback: 0.5
