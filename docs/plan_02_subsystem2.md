@@ -353,10 +353,18 @@ Se dispara cuando un candidate se marca `accepted`.
 
 **Lógica**:
 1. Crear item en Zotero via API con metadata del candidate.
-2. Si el candidate tiene DOI o URL con PDF descargable, intentar fetch del PDF:
-   - Priorizar: OpenAccess URL de OpenAlex → DOI resolver → Sci-Hub (NO, illegal) → URL del RSS.
-   - Si conseguimos PDF, adjuntar al item Zotero.
-   - Si no, item queda sin PDF, tag `needs-pdf`.
+2. Si el candidate tiene DOI o URL con PDF descargable, intentar fetch del PDF.
+   Priorizar en orden (detener en primer éxito):
+   1. OpenAccess URL de OpenAlex (`best_oa_location.pdf_url`)
+   2. DOI resolver (seguir redirect, verificar content-type PDF)
+   3. Anna's Archive (búsqueda por DOI/ISBN)
+   4. Library Genesis (búsqueda por DOI/título)
+   5. Sci-Hub (búsqueda por DOI)
+   6. URL del RSS (si sirve PDF directo)
+
+   Cada fuente es configurable via `.env` (`S2_PDF_SOURCES`). Un fetch por
+   candidato aceptado, rate-limited por servicio. Si ninguna fuente entrega
+   PDF, el item mantiene el tag `needs-pdf`.
 3. Aplicar tags derivados del scoring (los que mejor matchearon).
 4. Mover a colección "Inbox S2" en Zotero (configurable).
 5. Update del candidate: `zotero_item_key`, `pushed_at`.
