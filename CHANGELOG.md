@@ -43,6 +43,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Spec**: `docs/plan_01_subsystem1.md` §3 Etapa 03 — removed Ruta B
+  (Zotero "Retrieve Metadata for PDFs" recognizer applied to orphan
+  attachments). Items without a detected DOI, or where Ruta A's
+  translator fails, now fall directly to Ruta C → Etapa 04 enrichment
+  cascade. Expected distribution in §126 adjusted: Ruta A 50-60%, Ruta
+  C 40-50% (previously A 50-60% / B 15-20% / C 20-35%). `plan_glossary.md`
+  "Ruta A/B/C" entry renamed to "Ruta A/C"; the `import_route` column
+  comment in `src/zotai/state.py` now reads `'A' | 'C'`. Rationale: the
+  Zotero recognizer endpoint is not a stable public API and its
+  programmatic invocation is brittle between Zotero Desktop versions;
+  Etapa 04's cascade (04a-d) already covers the no-DOI case with
+  multiple sources and better LATAM/ES coverage; dropping from 3 to 2
+  routes shrinks Etapa 03's blast radius. (Option D from the 2026-04-21
+  alignment review.)
 - **Spec**: `docs/plan_02_subsystem2.md` §10 — replaced the single-line PDF
   fetch priority (which excluded Sci-Hub as "illegal") with an explicit
   six-source cascade: OpenAlex OA URL → DOI resolver → Anna's Archive →
