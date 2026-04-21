@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S1 Stage 01 — inventory** (#3): `zotai.s1.stage_01_inventory.run_inventory`
+  walks configured PDF folders, validates magic bytes, hashes via SHA-256,
+  detects DOIs from the first 3 pages, and persists `Item` rows with
+  `stage_completed=1`. Duplicates (same hash, new path) are reported in
+  `reports/inventory_report_<ts>.csv` without overwriting the winner's
+  `source_path`; re-runs are no-ops (`status=unchanged`). A new
+  `--retry-errors` flag re-invokes extraction on existing rows whose prior
+  pass left a `last_error` (transient I/O / pdfplumber failures), reporting
+  them as `retried` on success or `error` if the failure persists. The CLI
+  command `zotai s1 inventory [--folder PATH ...] [--retry-errors]` is now
+  functional and honours the root `--dry-run` flag (writes a `_dryrun`-
+  suffixed CSV and skips DB writes). Test suite covers the five canonical
+  fixtures, dedup, dry-run, re-run idempotence, retry-errors (transient +
+  persistent), CSV contents, CLI wiring, and the stage-abort threshold.
 - **Scaffolding** (#1): initial project skeleton — `pyproject.toml` with uv/hatchling,
   multi-stage `Dockerfile`, `docker-compose.yml` with `onboarding` and `dashboard`
   services, `.env.example`, Alembic config with an empty migrations directory,
