@@ -35,30 +35,84 @@ Pipeline CLI one-shot que lleva ~1000 PDFs dispersos en carpetas del usuario a s
 ### Etapa 01 — Inventory
 
 **Input**: rutas de carpetas fuente (desde `.env`: `PDF_SOURCE_FOLDERS`).
-**Output**: filas en tabla `items` del `state.db`.
+**Output**:
+- Filas en tabla `items` del `state.db` (solo para PDFs clasificados como académicos o ambiguos).
+- `reports/inventory_report_<ts>.csv`: todos los PDFs escaneados con su clasificación.
+- `reports/excluded_report_<ts>.csv`: PDFs rechazados por el clasificador — **no tienen fila en `state.db`**.
 
-**Lógica**:
-1. Recorrer recursivamente las carpetas.
-2. Para cada PDF:
-   - Calcular SHA-256 del archivo.
-   - Si el hash ya existe en DB, marcar como duplicado, no crear item nuevo.
-   - Extraer primeras 3 páginas como texto (via `pdfplumber`).
-   - Detectar si el PDF tiene capa de texto (threshold: >100 chars extraíbles de página 1).
-   - Buscar DOI por regex en texto extraíble.
-   - Persistir: `id` (hash), `source_path`, `size_bytes`, `has_text`, `detected_doi`, `stage_completed=01`.
-3. Generar reporte CSV con counts y anomalías.
+**Lógica** (para cada PDF bajo las carpetas fuente, en orden):
+1. Validar magic bytes (`%PDF-`); si falla, saltear con status `invalid_magic`.
+2. Calcular SHA-256 del archivo.
+3. Si el hash ya existe en DB: reportar como duplicado (status `duplicate`), no crear item nuevo.
+4. Extraer primeras 3 páginas como texto via `pdfplumber`.
+5. Detectar `has_text` (threshold: ≥100 chars extraíbles de página 1).
+6. Buscar DOI / arXiv / ISBN por regex en las primeras 3 páginas.
+7. **Clasificación** (nueva lógica — ver §3.1 Clasificador):
+   - Si marcador positivo claro → `classification='academic'`.
+   - Si marcador negativo claro → emitir fila en `excluded_report.csv` y **saltear** (no hay fila en `state.db`).
+   - Ambiguo → llamar LLM gate; según respuesta, `academic` o excluded.
+8. Persistir en `state.db`: `id` (hash), `source_path`, `size_bytes`, `has_text`, `detected_doi`, `classification`, `needs_review` (True iff LLM tuvo que decidir y el item quedó como ambiguo-incluido), `stage_completed=01`.
+
+#### §3.1 Clasificador académico / no-académico (tres ramas)
+
+Opera sobre el texto de las primeras 3 páginas + metadata barata (page count, tamaño).
+
+**Rama 1 — Accept automático** (zero cost). Se aplica al menos uno de:
+- DOI detectado (regex `10\.\d{4,9}/[-._;()/:A-Za-z0-9]+`).
+- arXiv ID detectado (`arXiv:\d{4}\.\d{4,5}` o `arxiv.org/abs/...`).
+- ISBN válido (10 o 13 dígitos con checksum).
+- Keywords académicos en páginas 1-3 (case-insensitive, word-boundary): `abstract`, `references`, `bibliography`, `introduction`, `keywords`, `JEL codes`, `et al\.`, `University of …`, `Universidad de …`, `Instituto de …`.
+
+Resultado: `classification='academic'`. Continúa al resto del pipeline.
+
+**Rama 2 — Reject automático** (zero cost). Se aplica cuando:
+- `page_count ≤ 2` **Y** (`has_text=False` **O** primera página contiene ≥1 keyword de facturación/documento personal del blacklist: `factura`, `recibo`, `invoice`, `receipt`, `CUIT`, `CUIL`, `DNI`, `ticket`, `boleta`, `comprobante`, `nota de débito`, `nota de crédito`, `voucher`, `bill`).
+
+Resultado: fila en `excluded_report.csv` con `reason`; **no entra a `state.db`**.
+
+**Rama 3 — Ambiguo → LLM gate** (costo marginal). Todo el resto. Se llama a `gpt-4o-mini` con un prompt corto:
+```
+You are classifying a PDF document for a researcher's bibliographic library.
+
+Here are the first 500 characters of page 1:
+---
+{first_page_snippet}
+---
+
+Page count: {page_count}
+
+Return JSON: {"is_academic": bool, "confidence": "low"|"medium"|"high", "reason": "<one short sentence>"}
+
+Academic = research paper, preprint, book chapter, thesis, technical report, working paper, or a similar scholarly work.
+Non-academic = bill, receipt, ID card, manual, slideshow deck, contract, personal document, administrative form, screenshot.
+```
+
+Decisión:
+- `is_academic=True` con `confidence∈{medium,high}` → `classification='academic'`, `needs_review=False`.
+- `is_academic=True` con `confidence=low` → `classification='academic'`, `needs_review=True`. Queda en `state.db` pero se surfacea en el reporte de Etapa 06.
+- `is_academic=False` con `confidence∈{medium,high}` → `excluded_report.csv`, no entra a DB.
+- `is_academic=False` con `confidence=low` → `classification='academic'`, `needs_review=True` (sesgo conservador: ante duda, incluir y flaggear).
+
+**Presupuesto**: ~$0.0004 por llamada al LLM gate. En un corpus de 1000 PDFs con mezcla ~30% ambiguos, eso son ~$0.12. Límite configurable `MAX_COST_USD_STAGE_01=1.00`. Al exceder, abortar con mensaje claro.
+
+**Control**: flag `--skip-llm-gate` salta la Rama 3 y trata todos los ambiguos como `academic` + `needs_review=True`. Útil para correr sin OPENAI_API_KEY.
 
 **Edge cases**:
-- PDFs corruptos: logear, marcar `last_error`, no detener pipeline.
-- PDFs protegidos con password: idem.
-- Archivos no-PDF con extensión `.pdf`: validar magic bytes.
-- Duplicados por hash: reportar en CSV, solo uno va al resto del pipeline.
+- PDFs corruptos: logear, marcar `last_error`, `classification='academic'` por default (sesgo conservador — no rechazamos lo que no podemos leer), `needs_review=True`.
+- PDFs protegidos con password: idem corruptos.
+- Archivos no-PDF con extensión `.pdf`: rechazar por magic bytes, van a `inventory_report` como `invalid_magic` (no se evalúan para clasificación).
+- Duplicados por hash: se evalúan contra el item que ya entró a DB; la clasificación no se recalcula.
+- LLM retorna JSON malformado: reintento 1 vez; si vuelve a fallar, default `academic` + `needs_review=True`.
 
-**Criterio de éxito etapa 01**: `stage_completed=01` en el 100% de PDFs válidos. Reporte `inventory_report.csv` generado.
+**Criterio de éxito etapa 01**:
+- `stage_completed=01` en el 100% de items que entraron a `state.db`.
+- Reportes `inventory_report.csv` y `excluded_report.csv` generados.
+- Costo total del LLM gate < presupuesto configurado.
 
 **CLI**:
 ```bash
-zotai s1 inventory [--folder PATH ...] [--dry-run]
+zotai s1 inventory [--folder PATH ...] [--dry-run] [--retry-errors] \
+  [--skip-llm-gate] [--max-cost N]
 ```
 
 ---
@@ -268,8 +322,9 @@ zotai s1 tag [--preview|--apply] [--max-cost N]
 2. **Distribución de tags**: tag counts, tags huérfanos (usados <3 veces), tags dominantes (>30% del corpus).
 3. **Consistencia**: items con `year` fuera de rango razonable [1900, current_year+1], items con 0 autores, items sin título.
 4. **Duplicados potenciales**: pares con `fuzz.ratio(title) > 90 AND same year`.
-5. **Costos**: total gastado, breakdown por etapa y servicio.
-6. **Tiempo**: por etapa, total wall-clock.
+5. **Filtrado Stage 01**: count de items rechazados (del `excluded_report.csv` de la última corrida de Stage 01) con razón desglosada (heurística negativa vs. LLM gate). Count de items con `needs_review=True` listados con link a Zotero para inspección manual.
+6. **Costos**: total gastado, breakdown por etapa y servicio (incluye `stage_01` si se usó LLM gate).
+7. **Tiempo**: por etapa, total wall-clock.
 
 **Output HTML**: navegable, con links a Zotero para cada item flagged.
 
@@ -295,6 +350,8 @@ class Item(SQLModel, table=True):
     size_bytes: int
     has_text: bool = False
     detected_doi: Optional[str] = None
+    classification: str = "academic"  # 'academic' only — rejects live in excluded_report.csv
+    needs_review: bool = False  # True when LLM gate was uncertain; surfaced in Etapa 06 report
     ocr_failed: bool = False
     zotero_item_key: Optional[str] = None
     import_route: Optional[str] = None  # 'A' | 'C' (Ruta B removed — see §3 Etapa 03)
@@ -358,6 +415,7 @@ REPORTS_FOLDER=/workspace/reports
 
 # ──────────── Budgets ────────────
 MAX_COST_USD_TOTAL=10.00
+MAX_COST_USD_STAGE_01=1.00      # LLM gate del clasificador académico (Rama 3)
 MAX_COST_USD_STAGE_04=2.00
 MAX_COST_USD_STAGE_05=1.00
 
@@ -427,6 +485,7 @@ Modo `--yes` skippea confirmaciones (para CI o usuarios experimentados).
 - Pipeline se reanuda desde stage_completed correcta tras interrupción.
 - `--dry-run` no modifica ni Zotero ni `state.db`.
 - Budget enforcement: mockear costos altos, verificar abort.
+- **Clasificador Stage 01**: fixture con (i) paper con DOI → Rama 1; (ii) paper con "Abstract" + "References" sin DOI → Rama 1; (iii) recibo de 1 página con keyword `factura` → Rama 2 (no entra a DB); (iv) PDF genérico de 5 páginas sin markers → Rama 3, mock OpenAI respuesta `{"is_academic": true, "confidence": "high"}` → entra con `needs_review=False`; (v) mismo PDF con LLM respondiendo `{"is_academic": true, "confidence": "low"}` → entra con `needs_review=True`; (vi) `--skip-llm-gate` deja todos los ambiguos como `academic + needs_review=True` sin llamar a OpenAI.
 
 ---
 

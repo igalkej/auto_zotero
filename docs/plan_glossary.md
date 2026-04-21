@@ -58,6 +58,15 @@ SQLite con candidates, feeds, queries. Separado del `state.db`. Ubicación: `/wo
 **Chroma DB**
 Base vectorial gestionada por `zotero-mcp` para embeddings. Ubicación canónica: `~/.config/zotero-mcp/chroma_db/`. S3 la escribe, S2 la lee.
 
+**Clasificador académico / no-académico** (S1 Etapa 01)
+Filtro upstream del pipeline S1. Decide, para cada PDF encontrado bajo `PDF_SOURCE_FOLDERS`, si es material bibliográfico o material de descarte (facturas, DNIs, tickets, manuales, etc.). Estrategia híbrida en 3 ramas: (1) **accept** automático por heurística positiva — DOI / arXiv / ISBN / keywords académicos en páginas 1-3; (2) **reject** automático por heurística negativa — ≤2 páginas + ausencia de texto o keywords de facturación en primera página; (3) **ambiguos** resueltos por `gpt-4o-mini` con prompt corto. Ver `plan_01_subsystem1.md` §3 Etapa 01 y §3.1.
+
+**Excluded report**
+CSV en `reports/excluded_report_<ts>.csv` que lista los PDFs rechazados por el clasificador con su razón. Estos PDFs **no entran a `state.db`** y no consumen OCR/API de stages posteriores. Archivo paralelo al `inventory_report.csv`.
+
+**Needs review**
+Flag booleano en `Item.needs_review`. True cuando el clasificador Stage 01 tuvo que decidir con incertidumbre (LLM respondió con `confidence=low`, o tras error transitorio). El item sigue al resto del pipeline como académico, pero se lo surfacea explícitamente en el reporte de Etapa 06 para que el usuario lo revise manualmente.
+
 **Ruta A/C** (S1 Etapa 03)
 Las dos estrategias de import:
 - **A**: import por DOI directo — el translator de Zotero resuelve metadata a partir del DOI detectado en Etapa 01.
