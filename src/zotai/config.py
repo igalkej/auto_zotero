@@ -181,7 +181,7 @@ class S2Settings(_GroupBase):
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8000
     max_cost_usd_daily: float = 0.50
-    max_cost_usd_monthly: float = 10.0
+    max_cost_usd_monthly: float = 5.0
 
     @field_validator("pdf_sources", mode="before")
     @classmethod
