@@ -445,7 +445,7 @@ Modo `--yes` skippea confirmaciones (para CI o usuarios experimentados).
 - [ ] `docker-compose.yml` con volúmenes correctos.
 - [ ] Tests con cobertura ≥60%.
 - [ ] `docs/setup-windows.md`, `docs/setup-linux.md`.
-- [ ] `docs/decisions/001-008` ADRs.
+- [ ] `docs/decisions/001-009` ADRs (see `plan_00_overview.md` §5).
 - [ ] README.md con quickstart.
 - [ ] CHANGELOG.md con entry para v0.1.0.
 

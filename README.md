@@ -29,7 +29,7 @@ Tres subsistemas. Docker para distribución cross-platform.
       S2: Captura prospectiva (scheduled worker + dashboard web)
 ```
 
-Ver `plan_00_overview.md` para el detalle.
+Ver `docs/plan_00_overview.md` para el detalle.
 
 ---
 
@@ -37,9 +37,9 @@ Ver `plan_00_overview.md` para el detalle.
 
 | Subsistema | Estado | Plan |
 |---|---|---|
-| S1 – Retroactive | 🟡 Spec, pendiente implementación | `plan_01_subsystem1.md` |
-| S3 – MCP access | 🟡 Spec, pendiente implementación | `plan_03_subsystem3.md` |
-| S2 – Prospective | 🟡 Spec, pendiente implementación | `plan_02_subsystem2.md` |
+| S1 – Retroactive | 🟡 Spec, pendiente implementación | `docs/plan_01_subsystem1.md` |
+| S3 – MCP access | 🟡 Spec, pendiente implementación | `docs/plan_03_subsystem3.md` |
+| S2 – Prospective | 🟡 Spec, pendiente implementación | `docs/plan_02_subsystem2.md` |
 
 ---
 
@@ -77,10 +77,10 @@ docker compose up dashboard
 ## Lectura para desarrollo
 
 1. `CLAUDE.md` — reglas del proyecto (auto-leído por Claude Code).
-2. `plan_00_overview.md` — arquitectura.
-3. `plan_glossary.md` — vocabulario canónico.
-4. `plan_taxonomy.md` — tags (requiere completarse).
-5. `plan_01/02/03_subsystem*.md` — specs por subsistema.
+2. `docs/plan_00_overview.md` — arquitectura.
+3. `docs/plan_glossary.md` — vocabulario canónico.
+4. `docs/plan_taxonomy.md` — tags (requiere completarse).
+5. `docs/plan_01/02/03_subsystem*.md` — specs por subsistema.
 
 ---
 
