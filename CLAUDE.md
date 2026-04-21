@@ -71,6 +71,7 @@ Este archivo es leído automáticamente por Claude Code al iniciar sesión en es
 - Convenciones conventional commits: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`.
 - Un commit = un cambio atómico. No mezclar refactor con feature.
 - Mensaje en inglés (el código también).
+- Todo cambio llega a `main` vía Pull Request desde una feature branch. Prohibido commitear o pushear directo a `main` (incluye cherry-pick, rebase-onto, merge manual). Un PR por unidad revisable.
 
 ### Reglas de interacción con el usuario
 
