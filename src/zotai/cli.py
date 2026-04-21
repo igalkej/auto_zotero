@@ -11,6 +11,7 @@ The `zotai` console script is declared in `pyproject.toml`:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
@@ -77,14 +78,62 @@ def _not_implemented(stage: str, phase: int, issue: int) -> None:
 
 @s1_app.command("inventory")
 def s1_inventory(
+    ctx: typer.Context,
     folder: Annotated[
-        Optional[list[str]],
-        typer.Option("--folder", help="Source folder(s). Repeat for multiple."),
+        Optional[list[Path]],
+        typer.Option(
+            "--folder",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+            help="Source folder(s) to scan. Repeat for multiple; falls back to PDF_SOURCE_FOLDERS.",
+        ),
     ] = None,
+    retry_errors: Annotated[
+        bool,
+        typer.Option(
+            "--retry-errors",
+            help=(
+                "Re-run extraction on previously-seen items that still carry "
+                "a last_error (useful after a transient I/O or pdfplumber "
+                "failure — same hash, same file content)."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Stage 01 — scan PDFs, hash, detect DOI."""
-    _ = folder
-    _not_implemented("s1 inventory", 2, 3)
+    from zotai.config import Settings
+    from zotai.s1.handler import StageAbortedError
+    from zotai.s1.stage_01_inventory import run_inventory
+
+    settings = Settings()
+    dry_run = bool(ctx.obj.get("dry_run", False)) or settings.behavior.dry_run
+    folders = folder or settings.paths.pdf_source_folders
+    if not folders:
+        typer.secho(
+            "No source folders — pass --folder or set PDF_SOURCE_FOLDERS.",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=2)
+
+    try:
+        result = run_inventory(
+            folders,
+            dry_run=dry_run,
+            retry_errors=retry_errors,
+            settings=settings,
+        )
+    except StageAbortedError as exc:
+        typer.secho(f"Stage aborted: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(
+        f"processed={result.items_processed} failed={result.items_failed} "
+        f"duplicates={result.duplicates} invalid={result.invalid} "
+        f"csv={result.csv_path}"
+    )
 
 
 @s1_app.command("ocr")
