@@ -58,11 +58,12 @@ SQLite con candidates, feeds, queries. Separado del `state.db`. Ubicación: `/wo
 **Chroma DB**
 Base vectorial gestionada por `zotero-mcp` para embeddings. Ubicación canónica: `~/.config/zotero-mcp/chroma_db/`. S3 la escribe, S2 la lee.
 
-**Ruta A/B/C** (S1 Etapa 03)
-Las tres estrategias de import:
-- **A**: import por DOI directo.
-- **B**: import por PDF → Zotero recognizer extrae DOI.
-- **C**: import como huérfano, bajar a enrichment.
+**Ruta A/C** (S1 Etapa 03)
+Las dos estrategias de import:
+- **A**: import por DOI directo — el translator de Zotero resuelve metadata a partir del DOI detectado en Etapa 01.
+- **C**: import como attachment huérfano sin parent. Absorbe todo lo que no cae por A (items sin DOI detectado, o items donde el translator de A no recuperó metadata utilizable). La recuperación de metadata para estos items sucede después, en la cascada de Etapa 04 (enrichment).
+
+La Ruta B (recognizer de Zotero Desktop sobre PDF huérfano) existió en versiones previas del plan y fue eliminada. Ver `plan_01_subsystem1.md` §3 Etapa 03 "Nota — ausencia de Ruta B" para el rationale.
 
 **Idempotencia**
 Propiedad de que una operación puede ejecutarse múltiples veces con el mismo efecto final que una sola ejecución. Crítico en todo el pipeline S1.

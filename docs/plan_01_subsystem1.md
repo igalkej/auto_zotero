@@ -102,15 +102,12 @@ zotai s1 ocr [--force-ocr] [--parallel N]
 2. Si éxito, adjuntar PDF al item creado.
 3. Persistir `zotero_item_key`, marcar `import_route='A'`.
 
-**Ruta B** (si A falla o no hay DOI):
-1. Subir PDF como attachment huérfano via Zotero API.
-2. Invocar endpoint "Retrieve Metadata for PDFs" de Zotero (request al servicio de recognizer).
-3. Si recupera metadata, crear parent item, asociar PDF.
-4. Persistir `zotero_item_key`, marcar `import_route='B'`.
+**Ruta C** (fallback — captura todo lo que no entra por A):
+1. Aplica cuando `detected_doi is null` **o** cuando Ruta A falla (el translator no recupera metadata utilizable).
+2. Subir PDF como attachment huérfano sin parent via Zotero API.
+3. Marcar `import_route='C'`, item queda pendiente de enrichment en Etapa 04.
 
-**Ruta C** (fallback):
-1. Subir PDF como attachment huérfano sin parent.
-2. Marcar `import_route='C'`, item queda pendiente de enrichment en Etapa 04.
+**Nota — ausencia de Ruta B**: versiones previas de este plan incluían una Ruta B que, para items sin DOI, subía el PDF huérfano y llamaba al endpoint "Retrieve Metadata for PDFs" de Zotero Desktop. Se eliminó en favor de consolidar toda recuperación de metadata en la cascada de Etapa 04 (04a identifiers → 04b OpenAlex → 04c Semantic Scholar → 04d LLM). Motivos: (a) el endpoint del recognizer de Zotero no es API pública estable y su invocación programática es frágil entre versiones; (b) la cascada de 04 ya resuelve el mismo problema con múltiples fuentes y mayor cobertura del corpus LATAM/ES; (c) reducir de 3 rutas a 2 baja el blast radius de Etapa 03.
 
 **Rate limiting**: Zotero API permite ~100 req/sec local. Configurar cliente con `httpx` + `tenacity` retry con exponential backoff.
 
@@ -122,9 +119,8 @@ zotai s1 ocr [--force-ocr] [--parallel N]
 - PDF >20MB: Zotero API tiene límites. Subirlo via WebDAV / file storage directo.
 
 **Tasa esperada**:
-- Ruta A: 50-60% del corpus (los que tienen DOI)
-- Ruta B: 15-20% adicional
-- Ruta C: 20-35% (residual que va a Etapa 04)
+- Ruta A: 50-60% del corpus (items con DOI detectado y translator exitoso).
+- Ruta C: 40-50% del corpus (items sin DOI + items donde A falló). Todos pasan por Etapa 04. La cascada 04a-d apunta a recuperar metadata en ≥80% de estos antes de mandar el resto a cuarentena en 04e.
 
 **Criterio de éxito etapa 03**: 100% de items tienen `zotero_item_key`. Distribución de `import_route` razonable.
 
@@ -301,7 +297,7 @@ class Item(SQLModel, table=True):
     detected_doi: Optional[str] = None
     ocr_failed: bool = False
     zotero_item_key: Optional[str] = None
-    import_route: Optional[str] = None  # 'A', 'B', 'C'
+    import_route: Optional[str] = None  # 'A' | 'C' (Ruta B removed — see §3 Etapa 03)
     stage_completed: int = 0
     in_quarantine: bool = False
     last_error: Optional[str] = None
