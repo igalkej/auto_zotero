@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
+from typing import Any
 
 import pytest
 from sqlmodel import Session, select
 from typer.testing import CliRunner
 
+from zotai.api.openai_client import BudgetExceededError, UsageRecord
 from zotai.cli import app
 from zotai.config import PathSettings, Settings
+from zotai.s1 import stage_01_inventory as mod
+from zotai.s1.classifier import ClassificationResult
 from zotai.s1.handler import StageAbortedError
 from zotai.s1.stage_01_inventory import run_inventory
 from zotai.state import Item, Run, init_s1, make_s1_engine
@@ -50,9 +54,10 @@ def test_valid_pdf_with_doi_persists_item(
     assert item.last_error is None
 
 
-def test_scanned_like_has_text_false(
+def test_scanned_multipage_persists_despite_no_text(
     pdf_builder: Callable[..., Path], tmp_path: Path
 ) -> None:
+    """3-page scanned PDF is kept (classifier rejects only ``pages<=2 AND no text``)."""
     folder = tmp_path / "pdfs"
     pdf_builder("scanned", directory=folder)
     settings = _settings(tmp_path, [folder])
@@ -65,6 +70,9 @@ def test_scanned_like_has_text_false(
     assert item.stage_completed == 1
     assert item.has_text is False
     assert item.detected_doi is None
+    # Ambiguous path (no LLM client in tests) → academic + needs_review.
+    assert item.classification == "academic"
+    assert item.needs_review is True
 
 
 def test_no_doi_pdf_persists_without_doi(
@@ -281,6 +289,9 @@ def test_csv_contents_match_run_rows(
         "size_bytes",
         "has_text",
         "detected_doi",
+        "classification",
+        "needs_review",
+        "rejection_reason",
         "status",
         "duplicate_of",
         "last_error",
@@ -355,3 +366,259 @@ def test_cli_exits_2_when_no_folders_configured(
     result = runner.invoke(app, ["s1", "inventory"])
 
     assert result.exit_code == 2
+
+
+# ─── Classifier integration tests (issue #24, plan_01 §3.1) ─────────────────
+
+
+def _patch_classify(
+    monkeypatch: pytest.MonkeyPatch,
+    result: ClassificationResult,
+    usage: UsageRecord | None = None,
+) -> None:
+    """Replace :func:`stage_01_inventory.classify` with a fixed-return stub."""
+
+    async def _fake_classify(**_: Any) -> tuple[ClassificationResult, UsageRecord | None]:
+        return result, usage
+
+    monkeypatch.setattr(mod, "classify", _fake_classify)
+
+
+def test_paper_with_doi_accepted_via_heuristic(
+    pdf_builder: Callable[..., Path], tmp_path: Path
+) -> None:
+    folder = tmp_path / "pdfs"
+    pdf_builder("text_doi", directory=folder)
+    settings = _settings(tmp_path, [folder])
+
+    run_inventory([folder], dry_run=False, settings=settings)
+
+    engine = make_s1_engine(str(settings.paths.state_db))
+    with Session(engine) as session:
+        item = session.exec(select(Item)).one()
+    assert item.classification == "academic"
+    assert item.needs_review is False
+
+
+def test_paper_with_keywords_accepted_via_heuristic(
+    pdf_builder: Callable[..., Path], tmp_path: Path
+) -> None:
+    folder = tmp_path / "pdfs"
+    pdf_builder("paper_keywords", directory=folder)
+    settings = _settings(tmp_path, [folder])
+
+    run_inventory([folder], dry_run=False, settings=settings)
+
+    engine = make_s1_engine(str(settings.paths.state_db))
+    with Session(engine) as session:
+        item = session.exec(select(Item)).one()
+    assert item.classification == "academic"
+    assert item.needs_review is False
+
+
+def test_factura_rejected_stays_out_of_db(
+    pdf_builder: Callable[..., Path], tmp_path: Path
+) -> None:
+    folder = tmp_path / "pdfs"
+    pdf_builder("factura_1page", directory=folder)
+    settings = _settings(tmp_path, [folder])
+
+    result = run_inventory([folder], dry_run=False, settings=settings)
+
+    engine = make_s1_engine(str(settings.paths.state_db))
+    with Session(engine) as session:
+        assert session.exec(select(Item)).all() == []
+    assert result.excluded == 1
+    assert len(result.excluded_rows) == 1
+    excluded = result.excluded_rows[0]
+    assert excluded.classifier_branch == "heuristic_negative"
+    assert "factura" in excluded.rejection_reason
+    excluded_row_statuses = [r.status for r in result.rows if r.status == "excluded"]
+    assert excluded_row_statuses == ["excluded"]
+
+
+def test_dni_scanned_rejected_short_no_text(
+    pdf_builder: Callable[..., Path], tmp_path: Path
+) -> None:
+    folder = tmp_path / "pdfs"
+    pdf_builder("dni_scanned", directory=folder)
+    settings = _settings(tmp_path, [folder])
+
+    result = run_inventory([folder], dry_run=False, settings=settings)
+
+    engine = make_s1_engine(str(settings.paths.state_db))
+    with Session(engine) as session:
+        assert session.exec(select(Item)).all() == []
+    assert result.excluded == 1
+    assert result.excluded_rows[0].rejection_reason == "short_no_text"
+
+
+def test_ambiguous_llm_high_confidence_accept(
+    pdf_builder: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_classify(
+        monkeypatch,
+        ClassificationResult(
+            decision="academic",
+            needs_review=False,
+            branch="llm_gate",
+            llm_reason="working paper",
+        ),
+    )
+    folder = tmp_path / "pdfs"
+    pdf_builder("ambiguous_short", directory=folder)
+    settings = _settings(tmp_path, [folder])
+
+    run_inventory([folder], dry_run=False, settings=settings)
+
+    engine = make_s1_engine(str(settings.paths.state_db))
+    with Session(engine) as session:
+        item = session.exec(select(Item)).one()
+    assert item.classification == "academic"
+    assert item.needs_review is False
+
+
+def test_ambiguous_llm_low_confidence_needs_review(
+    pdf_builder: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_classify(
+        monkeypatch,
+        ClassificationResult(
+            decision="academic",
+            needs_review=True,
+            branch="llm_gate",
+            llm_reason="uncertain",
+        ),
+    )
+    folder = tmp_path / "pdfs"
+    pdf_builder("ambiguous_short", directory=folder)
+    settings = _settings(tmp_path, [folder])
+
+    run_inventory([folder], dry_run=False, settings=settings)
+
+    engine = make_s1_engine(str(settings.paths.state_db))
+    with Session(engine) as session:
+        item = session.exec(select(Item)).one()
+    assert item.classification == "academic"
+    assert item.needs_review is True
+
+
+def test_ambiguous_llm_rejects_non_academic(
+    pdf_builder: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_classify(
+        monkeypatch,
+        ClassificationResult(
+            decision="reject",
+            needs_review=False,
+            branch="llm_gate",
+            rejection_reason="llm_non_academic",
+            llm_reason="looks like a slide deck",
+        ),
+    )
+    folder = tmp_path / "pdfs"
+    pdf_builder("ambiguous_short", directory=folder)
+    settings = _settings(tmp_path, [folder])
+
+    result = run_inventory([folder], dry_run=False, settings=settings)
+
+    engine = make_s1_engine(str(settings.paths.state_db))
+    with Session(engine) as session:
+        assert session.exec(select(Item)).all() == []
+    assert result.excluded == 1
+    assert result.excluded_rows[0].classifier_branch == "llm_gate"
+
+
+def test_skip_llm_gate_marks_ambiguous_as_needs_review(
+    pdf_builder: Callable[..., Path], tmp_path: Path
+) -> None:
+    folder = tmp_path / "pdfs"
+    pdf_builder("ambiguous_short", directory=folder)
+    settings = _settings(tmp_path, [folder])
+
+    run_inventory(
+        [folder], dry_run=False, skip_llm_gate=True, settings=settings
+    )
+
+    engine = make_s1_engine(str(settings.paths.state_db))
+    with Session(engine) as session:
+        item = session.exec(select(Item)).one()
+    assert item.classification == "academic"
+    assert item.needs_review is True
+
+
+def test_budget_exceeded_aborts_run(
+    pdf_builder: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _exploding_classify(**_: Any) -> tuple[ClassificationResult, UsageRecord | None]:
+        raise BudgetExceededError("budget is $0.00")
+
+    monkeypatch.setattr(mod, "classify", _exploding_classify)
+    folder = tmp_path / "pdfs"
+    pdf_builder("ambiguous_short", directory=folder)
+    settings = _settings(tmp_path, [folder])
+
+    with pytest.raises(StageAbortedError):
+        run_inventory([folder], dry_run=False, settings=settings)
+
+    engine = make_s1_engine(str(settings.paths.state_db))
+    with Session(engine) as session:
+        run_row = session.exec(select(Run)).one()
+    assert run_row.status == "aborted"
+
+
+def test_excluded_csv_written_with_expected_columns(
+    pdf_builder: Callable[..., Path], tmp_path: Path
+) -> None:
+    folder = tmp_path / "pdfs"
+    pdf_builder("factura_1page", directory=folder)
+    settings = _settings(tmp_path, [folder])
+
+    result = run_inventory([folder], dry_run=False, settings=settings)
+
+    assert result.excluded_csv_path.exists()
+    with result.excluded_csv_path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+    assert reader.fieldnames is not None
+    assert set(reader.fieldnames) == {
+        "source_path",
+        "sha256",
+        "size_bytes",
+        "page_count",
+        "rejection_reason",
+        "classifier_branch",
+        "llm_reason",
+    }
+    assert len(rows) == 1
+    assert rows[0]["classifier_branch"] == "heuristic_negative"
+    assert "factura" in rows[0]["rejection_reason"]
+
+
+def test_rerun_does_not_reclassify_existing_rows(
+    pdf_builder: Callable[..., Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Items already in ``state.db`` are not re-classified on re-run."""
+    folder = tmp_path / "pdfs"
+    pdf_builder("paper_keywords", directory=folder)
+    settings = _settings(tmp_path, [folder])
+
+    run_inventory([folder], dry_run=False, settings=settings)
+
+    async def _should_not_be_called(**_: Any) -> tuple[ClassificationResult, UsageRecord | None]:
+        raise AssertionError("classify() must not run on unchanged items")
+
+    monkeypatch.setattr(mod, "classify", _should_not_be_called)
+
+    second = run_inventory([folder], dry_run=False, settings=settings)
+    assert [r.status for r in second.rows] == ["unchanged"]

@@ -88,6 +88,23 @@ class OpenAIClient:
                 f"projected=${projected_cost:.4f}, budget=${self.budget_usd:.4f}"
             )
 
+    async def classify_document(
+        self, *, prompt: str, model: str = "gpt-4o-mini"
+    ) -> UsageRecord:
+        """Prompt-agnostic JSON-mode call used by the Stage 01 classifier.
+
+        The caller owns the prompt (see ``zotai.s1.classifier``) and the
+        JSON decoding. This method only enforces the budget ceiling and
+        the ``response_format=json_object`` mode.
+        """
+        self._check_budget()
+        resp = await self._client.chat.completions.create(
+            model=model,
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return self._build_usage_record(resp, model)
+
     async def extract_metadata(
         self, *, text: str, model: str = "gpt-4o-mini"
     ) -> UsageRecord:

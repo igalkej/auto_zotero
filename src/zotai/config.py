@@ -141,6 +141,7 @@ class BudgetSettings(_GroupBase):
         frozen=True,
     )
     max_cost_usd_total: float = 10.0
+    max_cost_usd_stage_01: float = 1.0
     max_cost_usd_stage_04: float = 2.0
     max_cost_usd_stage_05: float = 1.0
 

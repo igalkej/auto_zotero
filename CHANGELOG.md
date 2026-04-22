@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S1 Stage 01 — classifier** (#24): three-branch academic / non-academic
+  gate upstream of the rest of the S1 pipeline (plan_01 §3.1).
+  (1) Positive heuristic — zero-cost accept on DOI / arXiv / valid ISBN
+  / academic keyword hit in pages 1-3. (2) Negative heuristic — zero-cost
+  reject when `page_count <= 2` and either a billing / personal-document
+  keyword is present on page 1 or the PDF has no extractable text
+  (keyword match is preferred because it carries the more informative
+  rejection reason). (3) LLM gate — `gpt-4o-mini` JSON-mode call for
+  the ambiguous remainder, with one retry on malformed JSON and a
+  conservative bias (ambiguity → keep as academic with
+  `needs_review=True`). Landed as `src/zotai/s1/classifier.py`
+  (`heuristic_accept`, `heuristic_reject`, `llm_gate`, `classify`), a
+  new `OpenAIClient.classify_document` helper, and a new
+  `utils.pdf.count_pages`. Integrated into `stage_01_inventory`: accepted
+  items persist with `classification='academic' [+ needs_review]`;
+  rejected items never enter `state.db` and are written to
+  `reports/excluded_report_<ts>.csv` (columns: `source_path`, `sha256`,
+  `size_bytes`, `page_count`, `rejection_reason`, `classifier_branch`,
+  `llm_reason`). `inventory_report.csv` gained `classification`,
+  `needs_review`, and `rejection_reason` columns. CLI flags
+  `--skip-llm-gate` (ambiguous → needs_review without OpenAI) and
+  `--max-cost N` (per-run override of `MAX_COST_USD_STAGE_01`) added to
+  `zotai s1 inventory`. `BudgetSettings.max_cost_usd_stage_01` with
+  default `1.0` + `.env.example` line `MAX_COST_USD_STAGE_01=1.00`.
+  Alembic migration `20260422_classifier_columns` adds
+  `Item.classification` and `Item.needs_review` for existing DBs.
+  Covered by `tests/test_s1/test_classifier.py` (pure-function matrix)
+  and new integration scenarios in `tests/test_s1/test_stage_01.py`
+  (factura / DNI rejection, keyword acceptance, LLM mocking,
+  `--skip-llm-gate`, budget-exceeded abort, re-run does not
+  reclassify). As a drive-by, `_run_inventory_async` now snapshots
+  `Run` fields before the session closes to avoid a
+  `DetachedInstanceError` introduced by newer SQLAlchemy semantics.
 - **S1 Stage 01 — inventory** (#3): `zotai.s1.stage_01_inventory.run_inventory`
   walks configured PDF folders, validates magic bytes, hashes via SHA-256,
   detects DOIs from the first 3 pages, and persists `Item` rows with
