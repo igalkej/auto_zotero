@@ -150,7 +150,7 @@ def s1_ocr(
 def s1_import(
     batch_size: Annotated[int, typer.Option("--batch-size")] = 50,
 ) -> None:
-    """Stage 03 — import PDFs into Zotero (Route A/B/C)."""
+    """Stage 03 — import PDFs into Zotero (Route A/C)."""
     _ = batch_size
     _not_implemented("s1 import", 4, 5)
 
