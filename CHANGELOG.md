@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S1 Stage 03 — import to Zotero** (#5): `zotai.s1.stage_03_import.run_import`
+  walks every item with `stage_completed=2 AND has_text=True AND
+  classification='academic' AND zotero_item_key IS NULL` and pushes them
+  into Zotero using two routes per ADR 010 and plan_01 §3 Etapa 03.
+  **Route A** (DOI present): `OpenAlexClient.work_by_doi` fetches the
+  bibliographic record; `map_openalex_to_zotero` maps OpenAlex's schema
+  to Zotero's (title, creators with Western-order name split, DOI,
+  year, venue, `itemType` from a table covering journal articles,
+  chapters, books, dissertations, preprints, reports, proceedings),
+  reconstructing the abstract from OpenAlex's inverted index and
+  dropping items that fail the quality gate (missing title or zero
+  authors). Before creation, we quicksearch Zotero for an existing
+  item with the same DOI and link to it instead of duplicating.
+  **Route C** absorbs items without a DOI, items whose DOI isn't in
+  OpenAlex, and items that fail the quality gate — all land as top-
+  level orphan attachments that Stage 04's cascade will enrich. In
+  both routes the attachment is the OCR'd `staging/<hash>.pdf` if
+  Stage 02 produced one, otherwise the original `Item.source_path`;
+  Zotero copies the file to `~/Zotero/storage/<attach_key>/` in the
+  default **stored** mode. A connectivity probe (`items(limit=1)`)
+  runs before the first batch and aborts cleanly with
+  `StageAbortedError` if the Zotero local API is unreachable (desktop
+  not open, wrong keys), so users see the failure up-front rather
+  than mid-run. Processing is batched (default 50 items, 30 s sleep
+  between batches — both overridable via `--batch-size` and
+  `--batch-pause-seconds`); re-runs skip items that already have a
+  `zotero_item_key`. The CLI command `zotai s1 import
+  [--batch-size N] [--batch-pause-seconds S]` is now functional and
+  honours the root `--dry-run` flag (connectivity still probed but no
+  Zotero writes, no DB mutations, `_dryrun`-suffixed CSV). Per-item
+  reports land in `reports/import_report_<ts>.csv`. Covered by 18
+  tests: the mapping matrix (full record, missing title, no authors,
+  book chapter, unknown type default, single-token name), Route A
+  success, Route A fall-through on 404 and on missing title, Route A
+  dedup against an existing DOI, Route C orphan creation, the
+  "prefer staging over source" rule, eligibility filters
+  (already-imported / no text / prior stage), connectivity abort,
+  dry-run, batching cadence, CSV shape, and a CLI smoke test.
 - **S1 Stage 02 — OCR** (#4): `zotai.s1.stage_02_ocr.run_ocr` walks every
   item with `has_text=False AND stage_completed=1`, copies the source
   PDF to `staging/<sha256>.pdf`, runs `ocrmypdf.ocr()` (default
