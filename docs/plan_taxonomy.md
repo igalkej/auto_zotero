@@ -149,5 +149,78 @@ metodo:
 
 - [ ] Revisar esta lista sugerida y ajustarla al perfil real del corpus.
 - [ ] Completar descripciones y synonyms de cada tag.
-- [ ] Guardar en `config/taxonomy.yaml`.
+- [ ] Guardar en `config/taxonomy.yaml` y cambiar `status: template` por `status: customized`.
 - [ ] Commit a repo antes de correr `zotai s1 tag`.
+
+---
+
+## 8. Adaptar la taxonomía a tu dominio
+
+La lista de `config/taxonomy.yaml` viene sesgada a economía / ciencias sociales con foco LATAM. Si tu corpus es de otro dominio (biomedicina, física de altas energías, derecho, humanidades digitales, etc.), tenés que reemplazarla — no sumarle. El objetivo es que las etiquetas reflejen *tu* campo, no una sobre-cobertura de múltiples campos.
+
+### 8.1 Qué hace una buena tag
+
+Una tag útil cumple cuatro condiciones:
+
+1. **Granularidad adecuada**: ni tan amplia que taggée al 60% del corpus (`economia`, `biologia` — inútil para búsqueda), ni tan angosta que solo matchée 1-2 papers (`efectos-del-covid-sobre-la-tasa-de-actividad-femenina-en-CABA`). Apuntar a 3-10% del corpus por tag como zona saludable.
+2. **Ortogonalidad**: dos tags del mismo nivel no deberían ser casi-sinónimos. Si existieran `macro-monetaria` y `banca-central`, habría que elegir uno y mandar el otro a `synonyms`. En caso de duda, aplicar el **test del LLM**: ¿un tagger razonable podría dudar entre estas dos tags para el mismo paper? Si sí, son redundantes.
+3. **Estabilidad semántica**: la tag significa hoy lo mismo que va a significar dentro de 2 años. Evitar tags acopladas a eventos o modas (`post-pandemia`, `era-IA`) — esas son mejor en el `Date` nativo de Zotero.
+4. **Referible en una frase**: si no podés escribir una `description` de 1 línea para la tag, la tag no está clara todavía. Los `synonyms` son para variaciones de vocabulario (inglés/castellano, acrónimos), no para pegar varios conceptos.
+
+### 8.2 Cómo pensar TEMA vs METODO
+
+**TEMA responde "¿de qué es?"**. **METODO responde "¿cómo lo aborda?"**.
+
+Si te encontrás con una tag candidata en la que no está claro cuál de los dos es, probablemente estás mezclando: `tema-teorico` es malo (teórico es método), `empirico-macro` es malo (macro es tema). Las dos dimensiones se componen: un paper puede ser `macro-fiscal` × `empirico-quasi-exp`.
+
+Si tu dominio no tiene una división natural tema/método (p.ej. muchas humanidades), podés dejar METODO con 2-3 tags muy amplios (`narrativo-historico`, `caso-estudio`, `revision-literatura`) y poner el grueso del poder discriminativo en TEMA.
+
+### 8.3 Walkthrough: adaptar a biomedicina
+
+Para orientar, un ejemplo mínimo de cómo se vería la plantilla aplicada a un corpus de biomedicina traslacional:
+
+```yaml
+tema:
+  - id: oncologia-solida
+    description: "Tumores sólidos: mama, pulmón, colorrectal, próstata, etc."
+    synonyms: ["solid tumors", "breast cancer", "lung cancer"]
+  - id: hematologia
+    description: "Leucemias, linfomas, mieloma"
+    synonyms: ["leukemia", "lymphoma"]
+  - id: inmunoterapia
+    description: "Checkpoint inhibitors, CAR-T, vacunas terapéuticas"
+    synonyms: ["immunotherapy", "CAR-T", "checkpoint inhibitors"]
+  - id: farmacogenomica
+    description: "Variación genética y respuesta a drogas"
+    synonyms: ["pharmacogenomics"]
+  # ... (continuar 20-30 más)
+
+metodo:
+  - id: ensayo-clinico-fase-iii
+    description: "Ensayos clínicos de fase III, randomizados"
+    synonyms: ["phase III", "randomized clinical trial"]
+  - id: ensayo-clinico-temprano
+    description: "Fase I / II, pilotos, seguridad"
+    synonyms: ["phase I", "phase II"]
+  - id: estudio-preclinico
+    description: "Modelos animales, in vitro"
+    synonyms: ["preclinical", "in vivo", "in vitro"]
+  - id: observacional-cohorte
+    description: "Estudios de cohorte, case-control"
+    synonyms: ["cohort study", "case-control"]
+  # ... (continuar hasta ~10-12)
+```
+
+Este ejemplo ilustra el patrón: **TEMA se ancla a subespecialidades del dominio; METODO a niveles de evidencia / tipos de estudio del dominio**. La división es paralela a la de economía (TEMA = áreas, METODO = estrategia empírica), solo que el contenido cambia.
+
+### 8.4 Smoke-test antes de correr `zotai s1 tag`
+
+Antes del primer `--apply`, usar `--preview` sobre una muestra del corpus (20-30 items variados) y revisar el CSV resultante:
+
+- [ ] **Cobertura**: al menos 1 TEMA y 1 METODO por item.
+- [ ] **Reparto**: ningún tag aparece en >80% de los items (si pasa: tag demasiado amplio, split).
+- [ ] **Reparto**: ningún tag aparece en 0% (si pasa: tag nunca matchea, considerar borrar o ajustar `description`/`synonyms`).
+- [ ] **Consistencia manual**: elegir 5 items al azar y chequear que los tags que el LLM aplicó son los que vos hubieras elegido. Si hay desacuerdo sistemático en un tag, revisar su `description`.
+- [ ] **Tags inventados**: verificar que el CSV no tiene valores fuera de la taxonomía (el stage valida esto, pero conviene chequear a ojo).
+
+Si el smoke-test es OK, correr `--apply`. Si no, editar `config/taxonomy.yaml` y repetir el preview — la iteración es barata ($0.001 por 25 items).

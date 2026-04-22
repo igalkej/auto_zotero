@@ -315,11 +315,13 @@ def composite_score(c: Candidate, weights: Weights) -> float:
 
 **Archivo**: `src/zotai/s2/worker.py`
 
-**Tecnología**: APScheduler (in-process) o cron externo invocando `zotai s2 fetch`.
+**Tecnología**: APScheduler in-process es el default; cron / Task Scheduler es la alternativa para usuarios que no mantienen el dashboard corriendo 24/7. Ambos caminos invocan la misma función `run_fetch_cycle()`. Ver **ADR 012** (`docs/decisions/012-apscheduler-default-cron-alternative.md`) para el detalle de la decisión y la receta de cron.
 
-**Decisión preliminar**: APScheduler, porque corre en el mismo container que el dashboard, simplifica deploy. Alternativa cron si el dashboard no está 24/7.
+- **APScheduler default**: `docker compose up dashboard` arranca el scheduler en el mismo proceso que FastAPI. No hay pasos adicionales.
+- **Cron alternativo**: setear `S2_WORKER_DISABLED=true` en `.env` y configurar un job del SO que ejecute `docker compose run --rm onboarding zotai s2 fetch-once`. Recetas por OS en `docs/setup-linux.md` y `docs/setup-windows.md` (Phase 9 / #10).
+- **Dashboard `/worker/run-now`** dispara un fetch inmediato por background task, independiente del scheduler (plan §8.1).
 
-**Frecuencia default**: cada 6 horas. Configurable.
+**Frecuencia default**: cada 6 horas. Configurable via `S2_FETCH_INTERVAL_HOURS`.
 
 **Lógica del job**:
 ```python
@@ -362,16 +364,20 @@ Se dispara cuando un candidate se marca `accepted`.
    5. Sci-Hub (búsqueda por DOI)
    6. URL del RSS (si sirve PDF directo)
 
-   Cada fuente es configurable via `.env` (`S2_PDF_SOURCES`). Un fetch por
-   candidato aceptado, rate-limited por servicio. Si ninguna fuente entrega
-   PDF, el item mantiene el tag `needs-pdf`.
+   Cada fuente es configurable via `.env` (`S2_PDF_SOURCES`). **Knobs de control**:
+   - `S2_PDF_FETCH_MAX_ATTEMPTS_PER_CANDIDATE` (default 6) — tope de fuentes que se prueban antes de declarar el candidate como `needs-pdf`.
+   - `S2_PDF_FETCH_TIMEOUT_SECONDS` (default 30) — timeout por fuente; una fuente lenta no bloquea al worker.
+   - `S2_PDF_FETCH_MAX_MINUTES_WEEKLY` (default 20) — budget global wall-clock por semana para fetch de PDFs. Al excederlo, el worker salta el fetch y etiqueta `needs-pdf`; evita que un outage prolongado de Sci-Hub/LibGen queme tiempo del usuario. Se resetea el lunes 00:00 local.
+
+   Si ninguna fuente entrega PDF dentro del budget, el item mantiene el tag `needs-pdf` y queda visible en el dashboard para retry manual.
 3. Aplicar tags derivados del scoring (los que mejor matchearon).
-4. Mover a colección "Inbox S2" en Zotero (configurable).
+4. Mover a colección "Inbox S2" en Zotero. **El push la crea on-demand e idempotentemente** — si no existe, S2 la crea; si ya existe, la usa. El nombre viene de `S2_ZOTERO_INBOX_COLLECTION` (default `Inbox S2`). No se le pide al usuario que la cree a mano.
 5. Update del candidate: `zotero_item_key`, `pushed_at`.
 
 **Edge cases**:
 - Item ya existe en Zotero (mismo DOI): no duplicar, solo marcar `zotero_item_key` al existente.
 - Push falla (API error, red): retry con backoff, eventualmente marcar `push_failed`, mostrar en dashboard.
+- Colección `Inbox S2` renombrada por el usuario entre runs: la próxima corrida crea una nueva con el nombre canónico — no buscamos por nombre viejo. Si el usuario quiere renombrar persistentemente, también cambia `S2_ZOTERO_INBOX_COLLECTION` en `.env`.
 
 ---
 
@@ -437,8 +443,22 @@ Se dispara cuando un candidate se marca `accepted`.
 # ──────────── S2 Worker ────────────
 S2_FETCH_INTERVAL_HOURS=6
 S2_CANDIDATES_DB=/workspace/candidates.db
-S2_CHROMA_PATH=/workspace/chroma_db   # compartido con S3
-S2_ZOTERO_INBOX_COLLECTION=Inbox S2   # nombre de la colección destino
+# Container-side path. Montado desde la ChromaDB del host por el servicio
+# `dashboard` en docker-compose.yml. Ver ADR 011 y plan_03 §4.3 / §8.
+S2_CHROMA_PATH=/workspace/chroma_db
+# Host-side source para el bind mount. Default coincide con el path que planta
+# `zotero-mcp setup`. Override si tenés ChromaDB en otra ubicación.
+ZOTERO_MCP_CHROMA_HOST_PATH=${HOME}/.config/zotero-mcp/chroma_db
+# Cambiar a `true` para deshabilitar APScheduler in-process y usar cron/Task
+# Scheduler externo. Ver ADR 012.
+S2_WORKER_DISABLED=false
+S2_ZOTERO_INBOX_COLLECTION=Inbox S2   # S2 crea la colección on-demand
+
+# ──────────── S2 PDF fetch cascade ────────────
+S2_PDF_SOURCES=openaccess,doi,annas,libgen,scihub,rss
+S2_PDF_FETCH_MAX_ATTEMPTS_PER_CANDIDATE=6
+S2_PDF_FETCH_TIMEOUT_SECONDS=30
+S2_PDF_FETCH_MAX_MINUTES_WEEKLY=20
 
 # ──────────── S2 Dashboard ────────────
 S2_DASHBOARD_HOST=127.0.0.1
@@ -483,6 +503,6 @@ Cada una es un ticket para v1.1+.
 ## 15. Dependencias del S2
 
 - **S1** debe haber corrido: necesitamos biblioteca poblada para que el scoring funcione.
-- **S3** debe estar operativo: necesitamos ChromaDB para el score semántico.
-- **Zotero abierto** con API local (igual que S1).
-- **Worker y dashboard corriendo**: típicamente en el mismo Docker container (misma imagen), separado por service en docker-compose.
+- **S3** debe estar operativo: necesitamos ChromaDB para el score semántico. El acceso concreto se hace via bind mount read-only (`/workspace/chroma_db` dentro del container ← path del host). Ver ADR 011. Si ChromaDB está vacía o no existe todavía, `score_semantic=0.5` (neutral) y el dashboard sigue funcionando.
+- **Zotero abierto** con API local (igual que S1). S2 crea la colección `Inbox S2` (o el nombre en `S2_ZOTERO_INBOX_COLLECTION`) on-demand e idempotentemente en el primer push.
+- **Worker y dashboard corriendo**: por default APScheduler in-process en el mismo container del dashboard (ADR 012). Usuarios que no mantienen el dashboard 24/7 pueden setear `S2_WORKER_DISABLED=true` y usar cron / Task Scheduler externos (receta en `docs/setup-{linux,windows}.md`).

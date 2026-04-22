@@ -2,14 +2,34 @@
 # config/taxonomy.yaml — TEMA + METODO tag taxonomy.
 #
 # ⚠️  TEMPLATE — MUST BE CUSTOMIZED BEFORE Phase 6 (`zotai s1 tag`).
+#
 # The values below are the suggested defaults from `docs/plan_taxonomy.md`
-# for an economics / LATAM social-sciences corpus. Adapt them to match your
-# actual research profile, then change `status` below from `template` to
-# `customized`. `zotai s1 tag` refuses to run while `status: template`.
-# See docs/plan_taxonomy.md §7 for the user TODO checklist.
+# for an economics / LATAM social-sciences corpus. If your field is
+# different (biomedicine, law, CS, humanities, physics, ...) you should
+# REPLACE these entries — not extend them. Covering many fields at once
+# makes every tag too broad.
+#
+# HOW TO ADAPT:
+#   1. Read `docs/plan_taxonomy.md` §8 for the design principles, a
+#      biomedicine walkthrough, and a smoke-test checklist.
+#   2. Keep two dimensions: TEMA (what the paper is about) and METODO
+#      (how it approaches the problem). 25-40 tags total, kebab-case,
+#      no accents.
+#   3. Each entry needs an `id`, a one-line `description`, and a list of
+#      `synonyms` (LLM hints; not applied as tags).
+#   4. When done, change `status: template` → `status: customized` below.
+#      `zotai s1 tag` refuses to run while `status: template` so the
+#      default taxonomy never silently ends up in your Zotero library.
+#   5. Smoke-test with `zotai s1 tag --preview` on a subset before
+#      `--apply`.
+#
+# See also:
+#   - docs/plan_taxonomy.md §4 (application rules the tagger enforces)
+#   - docs/plan_taxonomy.md §5 (re-tagging workflow after edits)
+#   - docs/plan_taxonomy.md §8 (adapt-to-domain guide + smoke-test)
 # ─────────────────────────────────────────────────────────────
 version: 1
-status: template
+status: template  # change to `customized` once you have edited the lists below
 
 tema:
   # Macro
