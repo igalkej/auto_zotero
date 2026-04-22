@@ -158,9 +158,63 @@ would have to write into a Docker-managed path instead of its default.
 That leaks Docker into S3's surface, which ADR 001 explicitly avoids
 for anything the user interacts with outside the container.
 
+## Amendment (2026-04-22) — ADR 015 inverts the ownership direction
+
+ADR 015 ("S2 es owner del índice de embeddings; S3 es lector puro")
+reverses the write direction this ADR was built on. Under ADR 015, S2
+(inside the container) is the sole writer of ChromaDB; `zotero-mcp
+serve` on the host becomes a pure reader and `zotero-mcp update-db`
+is never invoked as part of the project's operational flow. The
+following items in this ADR's Decision / Positive consequences sections
+are superseded accordingly; the rest of the ADR (mechanism, host path,
+override pattern, cross-platform behaviour) stays in force verbatim.
+
+1. **Mount flag flips `:ro` → `:rw`.** The Compose snippet under
+   "Decision" now reads:
+
+   ```yaml
+   - ${ZOTERO_MCP_CHROMA_HOST_PATH:-${HOME}/.config/zotero-mcp/chroma_db}:/workspace/chroma_db:rw
+   ```
+
+2. **"The mount is read-only (`:ro`) for S2" bullet under Decision is
+   void.** S2 owns writes under ADR 015; a read-only mount would make
+   the reconciliation loop fail on its first upsert.
+
+3. **"S2 cannot corrupt the S3 index" argument (Positive consequences)
+   is inverted and weakened.** The kernel-level guarantee no longer
+   protects against S2 bugs (S2 *is* the writer now). Residual
+   protection: `zotero-mcp serve` on the host has no mount-based
+   write guard, but under ADR 015 it never writes — pinning its
+   version and validating via ADR 015's §5 empirical checklist
+   replaces the kernel-level protection this ADR had built.
+
+4. **"S1/S2 use pyzotero directly" scoping (ADR 009) is unchanged
+   for Zotero API calls** — S2 still uses `pyzotero` to read Zotero
+   state and push accepted items. What is new is that S2 *also*
+   writes to ChromaDB, through its own thin wrapper over the
+   ChromaDB Python client, not through `zotero-mcp`. The rejected
+   alternative B in this ADR ("S2 maintains its own ChromaDB") stays
+   rejected for the same reason (doubles storage / adds sync job);
+   under ADR 015 S2 writes to the single canonical store described
+   here.
+
+5. **Alternative D in this ADR ("bind-mount a named volume")**
+   stays rejected for the same reason: the host-side directory still
+   needs to be the place `zotero-mcp serve` reads from, and a named
+   volume is opaque to the host user.
+
+6. **Alternative C in this ADR ("S2 does not use ChromaDB at all")**
+   stays rejected; ADR 015 does not reopen it.
+
+The three "Negative" consequences of this ADR (Docker ≥ 20.10, path
+translation on Windows, rename of `chroma_db` is a coordinated
+change) survive unchanged under ADR 015.
+
 ## References
 
-- `docs/plan_02_subsystem2.md` §7.3, §12, §15
+- `docs/decisions/015-s2-owns-embeddings-index.md` — the amendment
+  rationale and the new ownership model
+- `docs/plan_02_subsystem2.md` §7.2, §12, §15
 - `docs/plan_03_subsystem3.md` §4.3, §8, §11
 - `docs/decisions/001-use-docker.md` — Docker as the distribution
   boundary

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Architecture — ADR 015**: S2 becomes the owner of the ChromaDB
+  embeddings index; S3 (`zotero-mcp serve`) is reduced to a pure
+  reader. The project no longer invokes `zotero-mcp update-db` in
+  any operational flow. S2's worker runs a reconciliation cycle
+  (diff-based add / safe-guarded delete) before each fetch, and a new
+  `zotai s2 backfill-index` command handles the initial population.
+  This inversion fixes: cross-platform cron fragility, silent
+  staleness between ad-hoc `update-db` runs, and the host/container
+  coreography that the previous design required. The decision
+  supersedes portions of ADR 006 and ADR 009, and amends ADR 011
+  (bind mount flag `:ro` → `:rw`). This PR lands only the ADR file
+  and the ADR 011 amendment; the ripple of doc alignments across
+  plans / glossary / CLAUDE.md / .env.example / scoring.yaml, the
+  empirical `zotero-mcp` schema validation, and the code module land
+  in follow-up PRs per the orden de trabajo.
 - **S1 Stage 03 dedup** (ADR 014): when Ruta A finds that a DOI is
   already in the user's Zotero library, the stage now checks the
   existing item for PDF attachments before adding ours.
