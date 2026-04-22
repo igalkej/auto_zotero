@@ -67,9 +67,9 @@ Ver `docs/plan_01_subsystem1.md` §3.1 para el detalle del clasificador.
 
 | Subsistema | Estado | Plan |
 |---|---|---|
-| S1 – Retroactive | 🟢 En implementación (Stage 01 inventory mergeado; classifier pendiente [#24](https://github.com/igalkej/auto_zotero/issues/24)) | `docs/plan_01_subsystem1.md` |
-| S3 – MCP access | 🟡 Spec, pendiente implementación | `docs/plan_03_subsystem3.md` |
-| S2 – Prospective | 🟡 Spec, pendiente implementación | `docs/plan_02_subsystem2.md` |
+| S1 – Retroactive | 🟢 En implementación (Stages 01 inventory+classifier, 02 OCR, 03 import mergeados; próximo Stage 04 enrich [#6](https://github.com/igalkej/auto_zotero/issues/6)) | `docs/plan_01_subsystem1.md` |
+| S3 – MCP access | 🟡 Spec, pendiente implementación ([#11](https://github.com/igalkej/auto_zotero/issues/11)) | `docs/plan_03_subsystem3.md` |
+| S2 – Prospective | 🟡 Spec, pendiente implementación ([#12](https://github.com/igalkej/auto_zotero/issues/12)–[#15](https://github.com/igalkej/auto_zotero/issues/15)) | `docs/plan_02_subsystem2.md` |
 
 ---
 
@@ -116,12 +116,14 @@ docker compose up dashboard
 
 ## Presupuestos estimados
 
-| Concepto | One-time | Mensual |
-|---|---|---|
-| S1 (APIs durante carga) | ~$2 | — |
-| S2 (APIs scoring) | — | ~$2 |
-| S3 (embeddings iniciales) | ~$2 | — |
-| Claude Pro (para usar MCP) | — | $20 |
+| Concepto | Estimado one-time | Estimado mensual | Hard cap |
+|---|---|---|---|
+| S1 (APIs durante carga) | ~$2 | — | $5 (alarma $10) |
+| S2 (APIs scoring) | — | ~$2 | $5/mes |
+| S3 (embeddings iniciales) | ~$2 | — | (compartido con S1) |
+| Claude Pro (para usar MCP) | — | $20 | — |
+
+**Estimado** = gasto típico observado en uso real. **Hard cap** = tope duro configurable en `.env` (`MAX_COST_USD_TOTAL`, `MAX_COST_USD_STAGE_*`, `S2_MAX_COST_USD_MONTHLY`); el pipeline aborta al superarlo.
 
 Tiempo humano: ~3h carga inicial + ~20 min/semana de triage.
 

@@ -66,11 +66,12 @@ def _root(
 
 def _not_implemented(stage: str, phase: int, issue: int) -> None:
     typer.secho(
-        f"`{stage}` is not yet implemented — scheduled for Phase {phase} (#{issue}).",
+        f"`{stage}` is not yet implemented — scheduled for Phase {phase} "
+        f"(#{issue}). Any flags passed are parsed but ignored until then.",
         err=True,
         fg=typer.colors.YELLOW,
     )
-    raise typer.Exit(code=1)
+    raise typer.Exit(code=2)
 
 
 # ─── S1 commands ──────────────────────────────────────────────────────────
