@@ -67,7 +67,7 @@ Ver `docs/plan_01_subsystem1.md` §3.1 para el detalle del clasificador.
 
 | Subsistema | Estado | Plan |
 |---|---|---|
-| S1 – Retroactive | 🟢 En implementación (Phase 2 / Stage 01 mergeado) | `docs/plan_01_subsystem1.md` |
+| S1 – Retroactive | 🟢 En implementación (Stage 01 inventory mergeado; classifier pendiente [#24](https://github.com/igalkej/auto_zotero/issues/24)) | `docs/plan_01_subsystem1.md` |
 | S3 – MCP access | 🟡 Spec, pendiente implementación | `docs/plan_03_subsystem3.md` |
 | S2 – Prospective | 🟡 Spec, pendiente implementación | `docs/plan_02_subsystem2.md` |
 
@@ -85,7 +85,7 @@ cp .env.example .env
 docker compose run onboarding zotai s1 run-all
 
 # Configurar S3 (MCP para Claude Desktop) - guía manual
-# ver docs/s3-setup.md
+# ver docs/s3-setup.md  (pendiente — Phase 10, #11)
 
 # Arrancar S2 (dashboard + worker)
 docker compose up dashboard
