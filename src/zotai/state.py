@@ -15,8 +15,10 @@ and evolve via code rather than alembic in v1 (see plan_02 §5).
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from typing import Any
 
-from sqlalchemy import MetaData, Table
+from sqlalchemy import DateTime as SADateTime
+from sqlalchemy import MetaData, Table, TypeDecorator
 from sqlalchemy.engine import Engine
 from sqlmodel import Field, SQLModel, create_engine
 
@@ -24,6 +26,35 @@ from sqlmodel import Field, SQLModel, create_engine
 def _utc_now() -> datetime:
     """Timezone-aware UTC timestamp used as default for `created_at` / `updated_at`."""
     return datetime.now(tz=UTC)
+
+
+class UTCDateTime(TypeDecorator[datetime]):
+    """SQLite-safe UTC-aware datetime column.
+
+    SQLite has no native datetime type and SQLAlchemy stores ``datetime``
+    values as ISO-8601 text *without* timezone information, so a
+    roundtrip strips the ``tzinfo`` we set on ``default_factory``. This
+    decorator re-attaches UTC on read and coerces naive binds to UTC on
+    write, so every datetime column behaves as if SQLite supported
+    timezone-aware datetimes natively.
+    """
+
+    impl = SADateTime
+    cache_ok = True
+
+    def process_bind_param(
+        self, value: datetime | None, dialect: Any
+    ) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
+
+    def process_result_value(
+        self, value: datetime | None, dialect: Any
+    ) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
 
 
 # ─── S1: state.db ───────────────────────────────────────────────────────────
@@ -54,8 +85,8 @@ class Item(SQLModel, table=True):
     last_error: str | None = None
     metadata_json: str | None = None
     tags_json: str | None = None
-    created_at: datetime = Field(default_factory=_utc_now)
-    updated_at: datetime = Field(default_factory=_utc_now)
+    created_at: datetime = Field(default_factory=_utc_now, sa_type=UTCDateTime)
+    updated_at: datetime = Field(default_factory=_utc_now, sa_type=UTCDateTime)
 
 
 class Run(SQLModel, table=True):
@@ -63,8 +94,8 @@ class Run(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
     stage: int
-    started_at: datetime = Field(default_factory=_utc_now)
-    finished_at: datetime | None = None
+    started_at: datetime = Field(default_factory=_utc_now, sa_type=UTCDateTime)
+    finished_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
     items_processed: int = 0
     items_failed: int = 0
     cost_usd: float = 0.0
@@ -81,7 +112,7 @@ class ApiCall(SQLModel, table=True):
     duration_ms: int = 0
     status: str = "success"  # 'success' | 'error' | 'rate_limited'
     item_id: str | None = Field(default=None, foreign_key="item.id")
-    timestamp: datetime = Field(default_factory=_utc_now)
+    timestamp: datetime = Field(default_factory=_utc_now, sa_type=UTCDateTime)
 
 
 # ─── S2: candidates.db ──────────────────────────────────────────────────────
@@ -97,7 +128,7 @@ class Candidate(SQLModel, table=True):
     authors_json: str
     abstract: str | None = None
     venue: str
-    published_at: datetime
+    published_at: datetime = Field(sa_type=UTCDateTime)
     url: str | None = None
 
     # Scoring (each in [0, 1])
@@ -109,16 +140,16 @@ class Candidate(SQLModel, table=True):
 
     # Triage
     status: str = "pending"  # 'pending' | 'accepted' | 'rejected' | 'deferred'
-    decided_at: datetime | None = None
+    decided_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
     decided_by: str | None = None
     decision_note: str | None = None
 
     # Zotero integration — set once push succeeds
     zotero_item_key: str | None = None
-    pushed_at: datetime | None = None
+    pushed_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
 
-    created_at: datetime = Field(default_factory=_utc_now)
-    updated_at: datetime = Field(default_factory=_utc_now)
+    created_at: datetime = Field(default_factory=_utc_now, sa_type=UTCDateTime)
+    updated_at: datetime = Field(default_factory=_utc_now, sa_type=UTCDateTime)
 
 
 class Feed(SQLModel, table=True):
@@ -129,7 +160,7 @@ class Feed(SQLModel, table=True):
     rss_url: str
     issn: str | None = None
     active: bool = True
-    last_fetched_at: datetime | None = None
+    last_fetched_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
     last_fetch_status: str | None = None
     items_fetched_total: int = 0
 
@@ -141,7 +172,7 @@ class PersistentQuery(SQLModel, table=True):
     query_text: str
     active: bool = True
     weight: float = 1.0
-    created_at: datetime = Field(default_factory=_utc_now)
+    created_at: datetime = Field(default_factory=_utc_now, sa_type=UTCDateTime)
 
 
 class TriageMetric(SQLModel, table=True):
