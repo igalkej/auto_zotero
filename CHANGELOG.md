@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S1 Stage 02 — OCR** (#4): `zotai.s1.stage_02_ocr.run_ocr` walks every
+  item with `has_text=False AND stage_completed=1`, copies the source
+  PDF to `staging/<sha256>.pdf`, runs `ocrmypdf.ocr()` (default
+  `skip_text=True`; `force_ocr=True` with the `--force-ocr` flag), and
+  batches DB updates at the end. OCR happens on `multiprocessing.Pool`
+  with `OCR_PARALLEL_PROCESSES` workers (default 4, overridable with
+  `--parallel N`; `N<=1` runs sequentially). Before the first copy the
+  stage verifies free disk on the staging volume ≥ 2× the corpus size;
+  if not, it aborts cleanly with `StageAbortedError`. Resume-safe: when
+  `staging/<hash>.pdf` already exists with a text layer, the worker
+  skips the `ocrmypdf` call. Items where OCR fails advance to
+  `stage_completed=2` anyway with `ocr_failed=True` and the error in
+  `last_error` so Stage 03 sees them. The CLI command `zotai s1 ocr
+  [--force-ocr] [--parallel N]` is now functional and honours the root
+  `--dry-run` flag (no file I/O, no DB writes, `_dryrun`-suffixed CSV).
+  Per-item reports land in `reports/ocr_report_<ts>.csv`. Tests cover
+  the happy path, the two failure modes (`ocrmypdf` exception + OCR
+  produces no text), no-op on already-processed items, disk-space
+  abort, dry-run, resume semantics, `--force-ocr` flag plumbing, and
+  CLI wiring. `ocrmypdf` is monkeypatched in every test so Tesseract
+  is not a test dependency.
 - **S1 Stage 01 — classifier** (#24): three-branch academic / non-academic
   gate upstream of the rest of the S1 pipeline (plan_01 §3.1).
   (1) Positive heuristic — zero-cost accept on DOI / arXiv / valid ISBN

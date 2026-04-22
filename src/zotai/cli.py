@@ -163,12 +163,52 @@ def s1_inventory(
 
 @s1_app.command("ocr")
 def s1_ocr(
-    force_ocr: Annotated[bool, typer.Option("--force-ocr")] = False,
-    parallel: Annotated[int | None, typer.Option("--parallel")] = None,
+    ctx: typer.Context,
+    force_ocr: Annotated[
+        bool,
+        typer.Option(
+            "--force-ocr",
+            help=(
+                "Re-OCR pages that already carry text. Default mode passes "
+                "skip_text=True to ocrmypdf so existing text layers survive."
+            ),
+        ),
+    ] = False,
+    parallel: Annotated[
+        int | None,
+        typer.Option(
+            "--parallel",
+            help=(
+                "Number of ocrmypdf workers. Defaults to "
+                "OCR_PARALLEL_PROCESSES; pass 1 to run sequentially."
+            ),
+        ),
+    ] = None,
 ) -> None:
-    """Stage 02 — OCR scanned PDFs."""
-    _ = force_ocr, parallel
-    _not_implemented("s1 ocr", 3, 4)
+    """Stage 02 — OCR scanned PDFs into the staging volume."""
+    from zotai.config import Settings
+    from zotai.s1.handler import StageAbortedError
+    from zotai.s1.stage_02_ocr import run_ocr
+
+    settings = Settings()
+    dry_run = bool(ctx.obj.get("dry_run", False)) or settings.behavior.dry_run
+
+    try:
+        result = run_ocr(
+            force_ocr=force_ocr,
+            parallel=parallel,
+            dry_run=dry_run,
+            settings=settings,
+        )
+    except StageAbortedError as exc:
+        typer.secho(f"Stage aborted: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(
+        f"processed={result.items_processed} failed={result.items_failed} "
+        f"applied={result.items_applied} resumed={result.items_resumed} "
+        f"csv={result.csv_path}"
+    )
 
 
 @s1_app.command("import")
