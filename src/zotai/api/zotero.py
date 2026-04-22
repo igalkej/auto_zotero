@@ -62,6 +62,19 @@ class ZoteroClient:
     def item(self, item_key: str) -> dict[str, Any]:
         return cast(dict[str, Any], self._client.item(item_key))
 
+    def children(
+        self, item_key: str, **kwargs: Any
+    ) -> list[dict[str, Any]]:
+        """Proxy to ``pyzotero.Zotero.children(item_key, **kwargs)``.
+
+        Used by Stage 03's dedup path to decide whether an existing
+        Zotero item already has a PDF attachment before we add ours
+        (ADR 014).
+        """
+        return cast(
+            list[dict[str, Any]], self._client.children(item_key, **kwargs)
+        )
+
     # ─── Writes — all respect dry_run ─────────────────────────────────────
 
     def create_items(self, items: list[dict[str, Any]]) -> dict[str, Any]:

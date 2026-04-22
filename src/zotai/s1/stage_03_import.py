@@ -91,6 +91,7 @@ _CSV_COLUMNS: Final[tuple[str, ...]] = (
 ImportStatus = Literal[
     "imported",
     "deduped",
+    "deduped_pdf_added",
     "skipped_already_imported",
     "failed",
     "dry_run",
@@ -300,6 +301,27 @@ def _find_existing_doi(
     return None
 
 
+def _existing_has_pdf_attachment(
+    zotero_client: ZoteroClient, item_key: str
+) -> bool:
+    """Return True iff the item already has at least one PDF attachment.
+
+    Used on the dedup path (ADR 014): when Stage 03 finds that the DOI
+    is already in the user's Zotero library, we skip attaching our PDF
+    if an existing PDF child is there — the user already had the paper
+    and its own copy. If the parent has *no* PDF (metadata-only import
+    from a prior session), we still attach.
+    """
+    for child in zotero_client.children(item_key):
+        data = child.get("data") or {}
+        if data.get("itemType") != "attachment":
+            continue
+        content_type = (data.get("contentType") or "").lower()
+        if content_type.startswith("application/pdf"):
+            return True
+    return False
+
+
 def _pick_attach_path(item: Item, staging_folder: Path) -> Path:
     """Return the PDF path to attach: staging copy if Stage 02 ran, else original."""
     staging_path = staging_folder / f"{item.id}.pdf"
@@ -363,14 +385,47 @@ async def _import_one(
                 else _find_existing_doi(zotero_client, doi_value)
             )
             if existing_key:
-                attach_response = (
-                    {"success": {"0": "DRYRUN"}}
-                    if dry_run
-                    else zotero_client.attachment_simple(
-                        [str(attached_path)], parent_key=existing_key
+                # ADR 014: if the existing Zotero item already carries a
+                # PDF attachment, the user already had this paper with
+                # its own copy. Do not add a second PDF child; just link
+                # our state row to the existing key.
+                if dry_run:
+                    dedup_status: ImportStatus = "dry_run"
+                else:
+                    already_has_pdf = _existing_has_pdf_attachment(
+                        zotero_client, existing_key
                     )
-                )
-                _ = attach_response  # attachment key not persisted in state
+                    if already_has_pdf:
+                        log.info(
+                            "stage_03.dedup.attach_skipped",
+                            existing_key=existing_key,
+                            reason="pdf_present",
+                        )
+                        dedup_status = "deduped"
+                    else:
+                        try:
+                            zotero_client.attachment_simple(
+                                [str(attached_path)],
+                                parent_key=existing_key,
+                            )
+                        except Exception as exc:
+                            return ImportRow(
+                                sha256=item.id,
+                                source_path=item.source_path,
+                                attached_path=str(attached_path),
+                                detected_doi=item.detected_doi,
+                                import_route="A",
+                                zotero_item_key=existing_key,
+                                status="failed",
+                                error=(
+                                    f"attachment_simple:{type(exc).__name__}:{exc}"
+                                ),
+                            )
+                        log.info(
+                            "stage_03.dedup.attach_added",
+                            existing_key=existing_key,
+                        )
+                        dedup_status = "deduped_pdf_added"
                 return ImportRow(
                     sha256=item.id,
                     source_path=item.source_path,
@@ -378,7 +433,7 @@ async def _import_one(
                     detected_doi=item.detected_doi,
                     import_route="A",
                     zotero_item_key=existing_key,
-                    status="deduped" if not dry_run else "dry_run",
+                    status=dedup_status,
                     error=None,
                 )
 
@@ -604,7 +659,11 @@ async def _run_import_async(
                     )
                     rows.append(row)
 
-                    if row.status in ("imported", "deduped"):
+                    if row.status in (
+                        "imported",
+                        "deduped",
+                        "deduped_pdf_added",
+                    ):
                         item.updated_at = now()
                         if not dry_run:
                             item.zotero_item_key = row.zotero_item_key
@@ -643,6 +702,7 @@ async def _run_import_async(
     csv_path = _csv_path(reports_folder, dry_run=dry_run, now=now())
     _write_csv(csv_path, rows)
 
+    _success_statuses = ("imported", "deduped", "deduped_pdf_added")
     result = ImportResult(
         run_id=run_id,
         rows=rows,
@@ -652,14 +712,16 @@ async def _run_import_async(
         items_route_a=sum(
             1
             for r in rows
-            if r.import_route == "A" and r.status in ("imported", "deduped")
+            if r.import_route == "A" and r.status in _success_statuses
         ),
         items_route_c=sum(
             1
             for r in rows
-            if r.import_route == "C" and r.status in ("imported", "deduped")
+            if r.import_route == "C" and r.status in _success_statuses
         ),
-        items_deduped=sum(1 for r in rows if r.status == "deduped"),
+        items_deduped=sum(
+            1 for r in rows if r.status in ("deduped", "deduped_pdf_added")
+        ),
         items_skipped=sum(
             1 for r in rows if r.status == "skipped_already_imported"
         ),

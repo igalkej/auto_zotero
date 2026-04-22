@@ -171,7 +171,7 @@ zotai s1 ocr [--force-ocr] [--parallel N]
 
 **Edge cases**:
 - Zotero desktop no abierto: error claro al usuario antes de arrancar, no a mitad.
-- Item ya existe en Zotero (detectable por DOI duplicado): no crear de nuevo, asociar nuestro `state.db` con el `item_key` existente.
+- Item ya existe en Zotero (detectable por DOI duplicado): no crear de nuevo, asociar nuestro `state.db` con el `item_key` existente. Política de adjunto (ADR 014): si el item existente ya tiene ≥1 attachment con `contentType=application/pdf`, saltar el adjunto (status `deduped`); si no, adjuntar nuestro PDF (status `deduped_pdf_added`). Evita duplicar PDFs cuando el usuario ya curó el paper, y agrega valor cuando solo había metadata.
 - PDF >20MB: Zotero API tiene límites. Subirlo via WebDAV / file storage directo.
 
 **Tasa esperada**:
