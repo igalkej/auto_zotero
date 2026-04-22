@@ -152,16 +152,18 @@ zotai s1 ocr [--force-ocr] [--parallel N]
 **Lógica por item**, en orden:
 
 **Ruta A** (si `detected_doi is not null`):
-1. Llamar Zotero API `POST /items` con `{itemType: 'journalArticle', DOI: detected_doi}` via translator chain → recupera metadata.
-2. Si éxito, adjuntar PDF al item creado.
-3. Persistir `zotero_item_key`, marcar `import_route='A'`.
+1. Resolver el DOI a metadata bibliográfica completa via `OpenAlexClient.work_by_doi(doi)` (endpoint `GET https://api.openalex.org/works/doi:<doi>`). OpenAlex ingiere CrossRef, DataCite, arXiv, PMC y PubMed, con cobertura >98% de DOIs académicos.
+2. Validar calidad de la metadata antes de escribir a Zotero: debe tener al menos `title` no vacío y `authorships` con al menos un autor. Si cualquiera falla, el item se redirige a Ruta C.
+3. Llamar Zotero API vía `pyzotero.create_items([{...full_metadata}])` con los campos mapeados desde OpenAlex (title, authors, DOI, year, venue, abstract, item_type).
+4. Adjuntar el PDF (`staging/<hash>.pdf` si Stage 02 corrió OCR, si no `Item.source_path`) como hijo del item creado via `pyzotero.attachment_simple([path], parent_key=item_key)`. Zotero copia el archivo a `~/Zotero/storage/<attach_key>/` (modo **Stored** — Zotero gestiona el archivo, el original queda intacto, la biblioteca es self-contained y compatible con cloud sync). No usamos modo *linked_file* en v1.
+5. Persistir `zotero_item_key` en `state.db`, marcar `import_route='A'`.
 
 **Ruta C** (fallback — captura todo lo que no entra por A):
-1. Aplica cuando `detected_doi is null` **o** cuando Ruta A falla (el translator no recupera metadata utilizable).
-2. Subir PDF como attachment huérfano sin parent via Zotero API.
-3. Marcar `import_route='C'`, item queda pendiente de enrichment en Etapa 04.
+1. Aplica cuando `detected_doi is null`, cuando OpenAlex devuelve 404/no-match para el DOI, o cuando la metadata devuelta es insuficiente (sin título o sin autores).
+2. Subir PDF como attachment huérfano sin parent via `pyzotero.attachment_simple([path], parent_key=None)`. Zotero copia el PDF a su storage igual que en Ruta A; el item queda como attachment top-level sin metadata bibliográfica.
+3. Marcar `import_route='C'`, item queda pendiente de enrichment en Etapa 04. La cascada 04a-d intenta recuperar metadata por identificadores alternativos (arXiv/ISBN), título fuzzy-match contra OpenAlex/Semantic Scholar, y finalmente LLM extrayendo metadata del texto del PDF (grounded). 04e envía los que fallan a `Quarantine`.
 
-**Nota — ausencia de Ruta B**: versiones previas de este plan incluían una Ruta B que, para items sin DOI, subía el PDF huérfano y llamaba al endpoint "Retrieve Metadata for PDFs" de Zotero Desktop. Se eliminó en favor de consolidar toda recuperación de metadata en la cascada de Etapa 04 (04a identifiers → 04b OpenAlex → 04c Semantic Scholar → 04d LLM). Motivos: (a) el endpoint del recognizer de Zotero no es API pública estable y su invocación programática es frágil entre versiones; (b) la cascada de 04 ya resuelve el mismo problema con múltiples fuentes y mayor cobertura del corpus LATAM/ES; (c) reducir de 3 rutas a 2 baja el blast radius de Etapa 03.
+**Nota — ausencia de Ruta B y fuente de metadata en Ruta A**: versiones previas de este plan (a) incluían una Ruta B que llamaba al endpoint "Retrieve Metadata for PDFs" de Zotero Desktop y (b) describían la resolución de DOI en Ruta A como "via translator chain" de la Zotero API. Ambas decisiones implicaban depender de endpoints del Zotero connector / recognizer que no son API pública estable y son frágiles entre versiones del desktop. Ambas se eliminaron con el mismo rationale: consolidar la recuperación de metadata en clientes HTTP documentados (OpenAlex/Semantic Scholar) y en la cascada de Etapa 04. Ver ADR 010 para el detalle de por qué Ruta A usa OpenAlex en vez del translator de Zotero.
 
 **Rate limiting**: Zotero API permite ~100 req/sec local. Configurar cliente con `httpx` + `tenacity` retry con exponential backoff.
 

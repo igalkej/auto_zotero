@@ -68,9 +68,9 @@ CSV en `reports/excluded_report_<ts>.csv` que lista los PDFs rechazados por el c
 Flag booleano en `Item.needs_review`. True cuando el clasificador Stage 01 tuvo que decidir con incertidumbre (LLM respondió con `confidence=low`, o tras error transitorio). El item sigue al resto del pipeline como académico, pero se lo surfacea explícitamente en el reporte de Etapa 06 para que el usuario lo revise manualmente.
 
 **Ruta A/C** (S1 Etapa 03)
-Las dos estrategias de import:
-- **A**: import por DOI directo — el translator de Zotero resuelve metadata a partir del DOI detectado en Etapa 01.
-- **C**: import como attachment huérfano sin parent. Absorbe todo lo que no cae por A (items sin DOI detectado, o items donde el translator de A no recuperó metadata utilizable). La recuperación de metadata para estos items sucede después, en la cascada de Etapa 04 (enrichment).
+Las dos estrategias de import a Zotero:
+- **A**: import con metadata via OpenAlex. Resolvemos el DOI detectado en Etapa 01 contra `api.openalex.org/works/doi:<doi>`, recibimos metadata completa (título, autores, año, venue, abstract), y creamos el item en Zotero con `pyzotero.create_items([...])` + attachment del PDF como hijo. Las versiones previas del plan describían esto como "via translator chain" de Zotero; ver ADR 010 para por qué usamos OpenAlex en su lugar.
+- **C**: import como attachment huérfano sin parent. Absorbe todo lo que no cae por A (items sin DOI detectado, o items donde OpenAlex no tiene el DOI o devuelve metadata sin título/autores). La recuperación de metadata para estos items sucede después, en la cascada de Etapa 04 (enrichment).
 
 La Ruta B (recognizer de Zotero Desktop sobre PDF huérfano) existió en versiones previas del plan y fue eliminada. Ver `plan_01_subsystem1.md` §3 Etapa 03 "Nota — ausencia de Ruta B" para el rationale.
 
