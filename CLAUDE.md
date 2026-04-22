@@ -51,6 +51,7 @@ Este archivo es leído automáticamente por Claude Code al iniciar sesión en es
 - **No reemplaza el juicio académico del usuario**: las sugerencias de cita requieren verificación manual obligatoria.
 - **No hay autenticación multiusuario, roles, permisos**: cada investigador es dueño único de su instancia.
 - **No hay nube propia**: todo corre localmente (o Zotero cloud para sync personal).
+- **No procesa PDFs no-académicos**: S1 Etapa 01 filtra explícitamente facturas, DNIs, tickets, manuales, etc. antes de gastar OCR / APIs en ellos. Ver `docs/plan_01_subsystem1.md` §3.1 para el clasificador (híbrido heurística + LLM gate). No remover el filtro sin ADR que lo justifique.
 
 ---
 

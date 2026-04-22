@@ -43,6 +43,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Spec**: `docs/plan_01_subsystem1.md` §3 Etapa 01 — added an
+  **academic / non-academic classifier** upstream of the rest of the S1
+  pipeline (plan §3.1). Hybrid strategy: (1) zero-cost positive
+  heuristic accept on DOI / arXiv / ISBN / academic keywords in pages
+  1-3; (2) zero-cost negative heuristic reject on `pages ≤ 2` combined
+  with absent text or billing keywords (`factura`, `recibo`, `invoice`,
+  `CUIT`, `CUIL`, `DNI`, `ticket`, etc.); (3) LLM gate (`gpt-4o-mini`)
+  for the ambiguous remainder, budgeted via a new
+  `MAX_COST_USD_STAGE_01=1.00` env var (~$0.12 / 1000 PDFs expected).
+  Rejected PDFs land in `reports/excluded_report_<ts>.csv` and never
+  enter `state.db`, so they consume no OCR or downstream API calls.
+  New `Item.classification` and `Item.needs_review` columns documented
+  (implementation lands in a separate PR — Phase 2.5). New CLI flags
+  `--skip-llm-gate` and `--max-cost N` on `zotai s1 inventory`.
+  `plan_glossary.md` gained entries for *Clasificador académico / no-
+  académico*, *Excluded report*, and *Needs review*. `README.md` and
+  `CLAUDE.md` updated accordingly. Rationale: researchers' source
+  folders (`Downloads/`, etc.) are mixed content; running the whole
+  pipeline on a DNI photo or electricity bill wastes OCR + API budget
+  and pollutes Zotero. Option C (híbrido) from the 2026-04-21 review.
 - **Spec**: `docs/plan_01_subsystem1.md` §3 Etapa 03 — removed Ruta B
   (Zotero "Retrieve Metadata for PDFs" recognizer applied to orphan
   attachments). Items without a detected DOI, or where Ruta A's
