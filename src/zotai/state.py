@@ -14,8 +14,7 @@ and evolve via code rather than alembic in v1 (see plan_02 §5).
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
-from typing import Optional
+from datetime import UTC, date, datetime
 
 from sqlalchemy import MetaData, Table
 from sqlalchemy.engine import Engine
@@ -24,7 +23,7 @@ from sqlmodel import Field, SQLModel, create_engine
 
 def _utc_now() -> datetime:
     """Timezone-aware UTC timestamp used as default for `created_at` / `updated_at`."""
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 # ─── S1: state.db ───────────────────────────────────────────────────────────
@@ -41,15 +40,20 @@ class Item(SQLModel, table=True):
     source_path: str
     size_bytes: int
     has_text: bool = False
-    detected_doi: Optional[str] = None
+    detected_doi: str | None = None
+    # Stage 01 classifier (plan_01 §3.1). Rejected PDFs never land in the
+    # DB — only 'academic' rows exist here. ``needs_review`` flags items
+    # the LLM gate was unsure about so Stage 06 surfaces them.
+    classification: str = "academic"
+    needs_review: bool = False
     ocr_failed: bool = False
-    zotero_item_key: Optional[str] = None
-    import_route: Optional[str] = None  # 'A' | 'C'
+    zotero_item_key: str | None = None
+    import_route: str | None = None  # 'A' | 'C'
     stage_completed: int = 0
     in_quarantine: bool = False
-    last_error: Optional[str] = None
-    metadata_json: Optional[str] = None
-    tags_json: Optional[str] = None
+    last_error: str | None = None
+    metadata_json: str | None = None
+    tags_json: str | None = None
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)
 
@@ -57,10 +61,10 @@ class Item(SQLModel, table=True):
 class Run(SQLModel, table=True):
     """A single execution of an S1 stage, used for metrics + resume semantics."""
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     stage: int
     started_at: datetime = Field(default_factory=_utc_now)
-    finished_at: Optional[datetime] = None
+    finished_at: datetime | None = None
     items_processed: int = 0
     items_failed: int = 0
     cost_usd: float = 0.0
@@ -70,13 +74,13 @@ class Run(SQLModel, table=True):
 class ApiCall(SQLModel, table=True):
     """Per-call observability for external services. Used for budget enforcement."""
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     run_id: int = Field(foreign_key="run.id")
     service: str  # 'openalex' | 'semantic_scholar' | 'openai' | 'zotero'
     cost_usd: float = 0.0
     duration_ms: int = 0
     status: str = "success"  # 'success' | 'error' | 'rate_limited'
-    item_id: Optional[str] = Field(default=None, foreign_key="item.id")
+    item_id: str | None = Field(default=None, foreign_key="item.id")
     timestamp: datetime = Field(default_factory=_utc_now)
 
 
@@ -88,13 +92,13 @@ class Candidate(SQLModel, table=True):
 
     id: str = Field(primary_key=True)  # hash of DOI or URL
     source_feed_id: str = Field(foreign_key="feed.id")
-    doi: Optional[str] = None
+    doi: str | None = None
     title: str
     authors_json: str
-    abstract: Optional[str] = None
+    abstract: str | None = None
     venue: str
     published_at: datetime
-    url: Optional[str] = None
+    url: str | None = None
 
     # Scoring (each in [0, 1])
     score_tags: float = 0.0
@@ -105,13 +109,13 @@ class Candidate(SQLModel, table=True):
 
     # Triage
     status: str = "pending"  # 'pending' | 'accepted' | 'rejected' | 'deferred'
-    decided_at: Optional[datetime] = None
-    decided_by: Optional[str] = None
-    decision_note: Optional[str] = None
+    decided_at: datetime | None = None
+    decided_by: str | None = None
+    decision_note: str | None = None
 
     # Zotero integration — set once push succeeds
-    zotero_item_key: Optional[str] = None
-    pushed_at: Optional[datetime] = None
+    zotero_item_key: str | None = None
+    pushed_at: datetime | None = None
 
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)
@@ -123,17 +127,17 @@ class Feed(SQLModel, table=True):
     id: str = Field(primary_key=True)  # slug
     name: str
     rss_url: str
-    issn: Optional[str] = None
+    issn: str | None = None
     active: bool = True
-    last_fetched_at: Optional[datetime] = None
-    last_fetch_status: Optional[str] = None
+    last_fetched_at: datetime | None = None
+    last_fetch_status: str | None = None
     items_fetched_total: int = 0
 
 
 class PersistentQuery(SQLModel, table=True):
     """A user-authored query that contributes to the composite score of every candidate."""
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     query_text: str
     active: bool = True
     weight: float = 1.0
@@ -143,7 +147,7 @@ class PersistentQuery(SQLModel, table=True):
 class TriageMetric(SQLModel, table=True):
     """Weekly precision/volume snapshot used on the dashboard's metrics page."""
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     week_start: date
     candidates_shown: int = 0
     candidates_accepted: int = 0
@@ -198,14 +202,14 @@ def init_s2(engine: Engine) -> None:
 
 
 __all__ = [
+    "S1_TABLES",
+    "S2_TABLES",
     "ApiCall",
     "Candidate",
     "Feed",
     "Item",
     "PersistentQuery",
     "Run",
-    "S1_TABLES",
-    "S2_TABLES",
     "TriageMetric",
     "init_s1",
     "init_s2",

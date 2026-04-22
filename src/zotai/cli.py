@@ -12,7 +12,7 @@ The `zotai` console script is declared in `pyproject.toml`:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 
@@ -80,7 +80,7 @@ def _not_implemented(stage: str, phase: int, issue: int) -> None:
 def s1_inventory(
     ctx: typer.Context,
     folder: Annotated[
-        Optional[list[Path]],
+        list[Path] | None,
         typer.Option(
             "--folder",
             exists=True,
@@ -101,8 +101,30 @@ def s1_inventory(
             ),
         ),
     ] = False,
+    skip_llm_gate: Annotated[
+        bool,
+        typer.Option(
+            "--skip-llm-gate",
+            help=(
+                "Skip Branch 3 of the classifier (LLM gate). Ambiguous PDFs "
+                "are kept as academic with needs_review=True without calling "
+                "OpenAI — useful when OPENAI_API_KEY is absent."
+            ),
+        ),
+    ] = False,
+    max_cost: Annotated[
+        float | None,
+        typer.Option(
+            "--max-cost",
+            help=(
+                "Override MAX_COST_USD_STAGE_01 for this invocation. Hard "
+                "cap on the LLM gate's cumulative spend; the stage aborts "
+                "when exceeded."
+            ),
+        ),
+    ] = None,
 ) -> None:
-    """Stage 01 — scan PDFs, hash, detect DOI."""
+    """Stage 01 — scan PDFs, classify academic vs. non-academic, persist."""
     from zotai.config import Settings
     from zotai.s1.handler import StageAbortedError
     from zotai.s1.stage_01_inventory import run_inventory
@@ -123,6 +145,8 @@ def s1_inventory(
             folders,
             dry_run=dry_run,
             retry_errors=retry_errors,
+            skip_llm_gate=skip_llm_gate,
+            max_cost=max_cost,
             settings=settings,
         )
     except StageAbortedError as exc:
@@ -132,6 +156,7 @@ def s1_inventory(
     typer.echo(
         f"processed={result.items_processed} failed={result.items_failed} "
         f"duplicates={result.duplicates} invalid={result.invalid} "
+        f"excluded={result.excluded} cost=${result.llm_cost_usd:.4f} "
         f"csv={result.csv_path}"
     )
 
@@ -139,7 +164,7 @@ def s1_inventory(
 @s1_app.command("ocr")
 def s1_ocr(
     force_ocr: Annotated[bool, typer.Option("--force-ocr")] = False,
-    parallel: Annotated[Optional[int], typer.Option("--parallel")] = None,
+    parallel: Annotated[int | None, typer.Option("--parallel")] = None,
 ) -> None:
     """Stage 02 — OCR scanned PDFs."""
     _ = force_ocr, parallel
@@ -157,8 +182,8 @@ def s1_import(
 
 @s1_app.command("enrich")
 def s1_enrich(
-    substage: Annotated[Optional[str], typer.Option("--substage")] = None,
-    max_cost: Annotated[Optional[float], typer.Option("--max-cost")] = None,
+    substage: Annotated[str | None, typer.Option("--substage")] = None,
+    max_cost: Annotated[float | None, typer.Option("--max-cost")] = None,
 ) -> None:
     """Stage 04 — enrichment cascade (04a-04e)."""
     _ = substage, max_cost
@@ -170,7 +195,7 @@ def s1_tag(
     preview: Annotated[bool, typer.Option("--preview")] = False,
     apply: Annotated[bool, typer.Option("--apply")] = False,
     re_tag: Annotated[bool, typer.Option("--re-tag")] = False,
-    max_cost: Annotated[Optional[float], typer.Option("--max-cost")] = None,
+    max_cost: Annotated[float | None, typer.Option("--max-cost")] = None,
 ) -> None:
     """Stage 05 — LLM tagging against the TEMA/METODO taxonomy."""
     _ = preview, apply, re_tag, max_cost

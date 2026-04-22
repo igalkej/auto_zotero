@@ -79,6 +79,12 @@ def has_text_layer(path: Path, threshold: int = _HAS_TEXT_THRESHOLD) -> bool:
     return len(pages[0]) >= threshold
 
 
+def count_pages(path: Path) -> int:
+    """Return the number of pages in the PDF at ``path``."""
+    with pdfplumber.open(path) as pdf:
+        return len(pdf.pages)
+
+
 def _iter_lines(chars: list[dict[str, Any]]) -> Iterator[tuple[float, float, str]]:
     """Group pdfplumber chars into lines keyed by rounded `top`.
 
@@ -127,6 +133,7 @@ def extract_probable_title(path: Path) -> str | None:
 
 
 __all__ = [
+    "count_pages",
     "detect_arxiv",
     "detect_doi",
     "extract_probable_title",
