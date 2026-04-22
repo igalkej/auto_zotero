@@ -213,11 +213,49 @@ def s1_ocr(
 
 @s1_app.command("import")
 def s1_import(
-    batch_size: Annotated[int, typer.Option("--batch-size")] = 50,
+    ctx: typer.Context,
+    batch_size: Annotated[
+        int,
+        typer.Option(
+            "--batch-size",
+            help="Items per batch before sleeping. Default 50.",
+        ),
+    ] = 50,
+    batch_pause_seconds: Annotated[
+        float,
+        typer.Option(
+            "--batch-pause-seconds",
+            help=(
+                "Seconds to sleep between batches. Default 30 — gives the "
+                "Zotero desktop sync breathing room. Set to 0 to disable."
+            ),
+        ),
+    ] = 30.0,
 ) -> None:
     """Stage 03 — import PDFs into Zotero (Route A/C)."""
-    _ = batch_size
-    _not_implemented("s1 import", 4, 5)
+    from zotai.config import Settings
+    from zotai.s1.handler import StageAbortedError
+    from zotai.s1.stage_03_import import run_import
+
+    settings = Settings()
+    dry_run = bool(ctx.obj.get("dry_run", False)) or settings.behavior.dry_run
+
+    try:
+        result = run_import(
+            batch_size=batch_size,
+            batch_pause_seconds=batch_pause_seconds,
+            dry_run=dry_run,
+            settings=settings,
+        )
+    except StageAbortedError as exc:
+        typer.secho(f"Stage aborted: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(
+        f"processed={result.items_processed} failed={result.items_failed} "
+        f"route_a={result.items_route_a} route_c={result.items_route_c} "
+        f"deduped={result.items_deduped} csv={result.csv_path}"
+    )
 
 
 @s1_app.command("enrich")
