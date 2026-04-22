@@ -83,8 +83,10 @@ Permitir al investigador consultar su biblioteca Zotero desde Claude Desktop med
 
 ### 4.3 ChromaDB local
 
-- Path: `~/.config/zotero-mcp/chroma_db/` (default) o configurable.
-- **Shared con S2**: `S2_CHROMA_PATH` en `.env` apunta a este mismo path. S2 lee-only.
+- **Path en el host** (donde `zotero-mcp` escribe): `~/.config/zotero-mcp/chroma_db/` por default. Configurable en `.env` via `ZOTERO_MCP_CHROMA_HOST_PATH` — típicamente coincide con lo que `zotero-mcp setup` elige.
+- **Path en el container S2** (donde S2 lee): `/workspace/chroma_db`. Es siempre este valor, consistente con la convención `/workspace/*` del resto del container. `S2_CHROMA_PATH=/workspace/chroma_db` por default.
+- **El puente**: el servicio `dashboard` de `docker-compose.yml` monta el path del host en `/workspace/chroma_db:ro` (read-only para S2). Ver **ADR 011** (`docs/decisions/011-chromadb-bind-mount.md`) para el rationale completo.
+- **S2 lee, nunca escribe.** El mount es `:ro`, así que un bug que intente `chroma.add()` falla fuerte en vez de divergir silenciosamente del índice que mantiene `zotero-mcp`.
 
 ---
 
@@ -209,11 +211,11 @@ Problemas comunes:
 
 ## 8. Integración con S2 (shared ChromaDB)
 
-S2 usa el mismo ChromaDB para su criterio `score_semantic`. Implicancias:
+S2 usa el mismo ChromaDB que `zotero-mcp` para su criterio `score_semantic`. Detalles en ADR 011; resumen:
 
-- **Path compartido**: configurar `S2_CHROMA_PATH` en `.env` al mismo path que `zotero-mcp` (default `~/.config/zotero-mcp/chroma_db/`).
-- **S2 solo lee**: nunca escribe a ChromaDB, solo queries.
-- **Si ChromaDB vacía o desincronizada**: S2 degrada gracefully, `score_semantic=0.5` (neutral).
+- **Un solo store físico en disco**: el que `zotero-mcp` mantiene en `${ZOTERO_MCP_CHROMA_HOST_PATH:-$HOME/.config/zotero-mcp/chroma_db}`. No hay copia ni sync job.
+- **S2 lo ve via bind mount** en `/workspace/chroma_db` (read-only). El container nombra `S2_CHROMA_PATH=/workspace/chroma_db`; el host decide qué directorio "real" se monta ahí.
+- **Si ChromaDB vacía o desincronizada** (p.ej. el usuario nunca terminó el setup de S3): S2 degrada gracefully, `score_semantic=0.5` (neutral). El dashboard muestra un warning apuntando a `docs/s3-setup.md`.
 
 ---
 
@@ -225,7 +227,7 @@ S2 usa el mismo ChromaDB para su criterio `score_semantic`. Implicancias:
 - [ ] `docs/s3-troubleshooting.md` con problemas comunes.
 - [ ] `docs/decisions/006-zotero-mcp.md` ADR justificando no desarrollar custom.
 - [ ] Script helper `scripts/reindex-s3.sh` (y `.ps1`) para re-indexación fácil.
-- [ ] Verificación de que `S2_CHROMA_PATH` está documentado coherentemente entre S2 y S3.
+- [ ] Verificación de que `S2_CHROMA_PATH` está documentado coherentemente entre S2 y S3 (cumplido por ADR 011 y los edits de §4.3 / §8).
 
 ---
 
