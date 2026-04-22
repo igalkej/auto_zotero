@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _ENV_FILE = ".env"
 _ENV_ENCODING = "utf-8"
@@ -117,7 +117,9 @@ class PathSettings(_GroupBase):
         extra="ignore",
         frozen=True,
     )
-    pdf_source_folders: list[Path] = Field(default_factory=list)
+    # ``NoDecode`` stops pydantic-settings 2.3+ from trying to JSON-parse the
+    # comma-separated env value before our ``_split_csv`` validator runs.
+    pdf_source_folders: Annotated[list[Path], NoDecode] = Field(default_factory=list)
     staging_folder: Path = Path("/workspace/staging")
     state_db: Path = Path("/workspace/state.db")
     reports_folder: Path = Path("/workspace/reports")
@@ -176,7 +178,9 @@ class S2Settings(_GroupBase):
     candidates_db: Path = Path("/workspace/candidates.db")
     chroma_path: Path = Path("/workspace/chroma_db")
     zotero_inbox_collection: str = "Inbox S2"
-    pdf_sources: list[str] = Field(
+    # ``NoDecode`` stops pydantic-settings 2.3+ from trying to JSON-parse the
+    # comma-separated env value before our ``_split_csv`` validator runs.
+    pdf_sources: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["openaccess", "doi", "annas", "libgen", "scihub", "rss"]
     )
     dashboard_host: str = "127.0.0.1"
