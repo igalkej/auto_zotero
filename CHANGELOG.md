@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Networking**: the `onboarding` and `dashboard` Compose services
+  switch from `network_mode: host` to default bridge networking with
+  `extra_hosts: - "host.docker.internal:host-gateway"` so the same
+  setup works on Linux, macOS, and Windows uniformly (the previous
+  `network_mode: host` silently no-ops on Docker Desktop). `pyzotero`'s
+  hardcoded `http://localhost:23119/api` endpoint is now overridable
+  via `ZOTERO_LOCAL_API_HOST` (new `.env` key, default
+  `http://host.docker.internal:23119` inside the Compose containers;
+  empty outside Docker → pyzotero's default stands). New
+  `ZoteroSettings.local_api_host` setting + `ZoteroClient(..,
+  local_api_host=...)` constructor kwarg; Stage 03 wires it through
+  from settings. The `dashboard` container's uvicorn bind moves from
+  `127.0.0.1` to `0.0.0.0` *inside* the container so the
+  `127.0.0.1:8000:8000` port mapping (now truthful under bridge mode)
+  actually reaches it — the host-side binding remains localhost-only.
+  Covered by new `tests/test_api/test_zotero.py` (endpoint respects
+  default, override, trailing-slash strip, and is ignored when
+  `local=False`). See ADR 013.
+
 ### Added
 
 - **S1 Stage 03 — import to Zotero** (#5): `zotai.s1.stage_03_import.run_import`

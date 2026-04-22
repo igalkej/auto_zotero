@@ -30,6 +30,7 @@ class ZoteroClient:
         library_type: str = "user",
         api_key: str,
         local: bool = True,
+        local_api_host: str | None = None,
         dry_run: bool = False,
     ) -> None:
         self._client = zotero.Zotero(
@@ -38,6 +39,15 @@ class ZoteroClient:
             api_key=api_key,
             local=local,
         )
+        if local and local_api_host:
+            # pyzotero hardcodes ``self.endpoint = "http://localhost:23119/api"``
+            # when ``local=True`` (see ``pyzotero.zotero.Zotero.__init__``).
+            # Inside a bridge-mode Docker container, ``localhost`` resolves to
+            # the container itself — Zotero Desktop's local API lives on the
+            # host and must be reached via ``host.docker.internal`` (wired via
+            # Compose's ``extra_hosts: host-gateway``). Override the endpoint
+            # so the same pyzotero calls work transparently. See ADR 013.
+            self._client.endpoint = f"{local_api_host.rstrip('/')}/api"
         self.dry_run = dry_run
 
     # ─── Reads ────────────────────────────────────────────────────────────

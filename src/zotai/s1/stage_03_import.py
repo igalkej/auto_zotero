@@ -558,6 +558,7 @@ async def _run_import_async(
             library_type=settings.zotero.library_type,
             api_key=settings.zotero.api_key.get_secret_value(),
             local=settings.zotero.local_api,
+            local_api_host=settings.zotero.local_api_host or None,
             dry_run=dry_run,
         )
     if openalex_client is None:
