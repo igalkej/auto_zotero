@@ -178,6 +178,20 @@ zotai s1 ocr [--force-ocr] [--parallel N]
 - Ruta A: 50-60% del corpus (items con DOI detectado y translator exitoso).
 - Ruta C: 40-50% del corpus (items sin DOI + items donde A falló). Todos pasan por Etapa 04. La cascada 04a-d apunta a recuperar metadata en ≥80% de estos antes de mandar el resto a cuarentena en 04e.
 
+**Aviso — corpus LATAM-heavy**. Los números anteriores asumen corpus
+anglo-dominante (revistas indexadas en CrossRef / PMC / arXiv). Para
+corpus heavy en publicaciones latinoamericanas (CEPAL Review,
+Desarrollo Económico, Estudios Económicos, papers BID / CAF / BCRA,
+journals de SciELO y RedALyC), la cobertura de OpenAlex / Semantic
+Scholar cae notablemente — entre 20% y 50% según el journal. El split
+realista para el usuario-target del proyecto (investigador CONICET,
+foco LATAM) es más cerca de **Ruta A 30-40% / Ruta C 60-70%**. Eso
+empuja más items a la cascada de Etapa 04, y en particular a 04d
+(LLM), subiendo el costo. Ver §3 Etapa 04 "Aviso — corpus LATAM-heavy"
+para el ajuste de budget, y la issue tracker para la extensión con
+fuentes LATAM (REDIB, SciELO, La Referencia, RedALyC) que está
+planificada fuera del scope v1.
+
 **Criterio de éxito etapa 03**: 100% de items tienen `zotero_item_key`. Distribución de `import_route` razonable.
 
 **CLI**:
@@ -245,14 +259,16 @@ Do NOT invent information.
 
 **Presupuesto por sub-etapa**:
 - 04a-c: $0 (APIs gratuitas, solo rate limits).
-- 04d: max $2 configurable. Si excede, pausar y pedir confirmación.
+- 04d: max $2 configurable (`MAX_COST_USD_STAGE_04`, default 2.00). Si excede, pausar y pedir confirmación.
+
+**Aviso — corpus LATAM-heavy**. El default de $2 asume que la cascada 04a-c (gratis) resuelve 80%+ de los Ruta C. Para corpus LATAM-heavy (ver §3 Etapa 03 "Aviso — corpus LATAM-heavy"), la cobertura de OpenAlex y Semantic Scholar cae y una fracción mayor del corpus llega a 04d. Estimación pesimista: 40% del corpus (≈400 items sobre 1000) × $0.0004 / item = ~$1.60, todavía dentro de $2. Pero con ruido de retries malformados y papers largos puede exceder. **Recomendación para usuarios LATAM-heavy**: setear `MAX_COST_USD_STAGE_04=4.00` en `.env` antes de correr la etapa, y observar el costo real en el reporte de Etapa 06 para ajustar en corridas futuras. El cap duro sigue obligando a confirmación explícita antes de gastar extra.
 
 **Edge cases**:
 - API down (OpenAlex, Semantic Scholar): retry con backoff; tras 3 fallos, saltar item y continuar.
 - Título extraído es genérico ("Chapter 1", "Introduction"): detectable por longitud <5 palabras o coincidencia con blacklist. Saltar a siguiente sub-etapa directamente.
 - LLM retorna JSON malformado: reintentar 1 vez con mensaje corregir. Si falla, cuarentena.
 
-**Criterio de éxito etapa 04**: <10% del corpus original en cuarentena.
+**Criterio de éxito etapa 04**: <10% del corpus original en cuarentena para corpus anglo-dominante; **<25% para corpus LATAM-heavy** hasta que el scope v1.1 agregue fuentes específicas (REDIB / SciELO / La Referencia / RedALyC). Etapa 06 Validation reporta el % real y permite al usuario decidir si (a) el corpus justifica priorizar la issue de fuentes LATAM o (b) el % está dentro de lo aceptable para este investigador.
 
 **CLI**:
 ```bash

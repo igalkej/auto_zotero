@@ -456,6 +456,25 @@ Se dispara cuando un candidate se marca `accepted`.
 
 **Nota — el push no escribe a ChromaDB directamente**. La escritura a ChromaDB ocurre en el siguiente ciclo de reconciliación del worker (paso 0 del diagrama §4 / pseudocódigo §9), que detecta el nuevo item en Zotero y lo embebe. Esto mantiene un único path de escritura a ChromaDB, simple de testear y auditar (ver ADR 015). El precio: hay una ventana de hasta `S2_FETCH_INTERVAL_HOURS` entre el push y la disponibilidad del item en queries semánticas — aceptable para el flujo de S3 (Claude Desktop), donde el usuario raramente consulta sobre papers que aceptó hace minutos.
 
+### 10.3 Verificación post-descarga (toda fuente)
+
+Anna's Archive, LibGen y Sci-Hub son mirrors rotatorios: dominios que cambian, captchas esporádicos, y con frecuencia devuelven HTML de error con `status=200` (página de captcha, "Try later", landing page del mirror). Confiar en el status code es insuficiente. Cada fuente — incluso las "seguras" como OpenAlex OA URL y el resolver de DOI — debe entregar un archivo que pasa los **4 chequeos en orden**; falla cualquiera → tratar como miss y probar la siguiente fuente:
+
+1. **Content-Type** (del response header): debe empezar con `application/pdf`. Filtra HTML de error / landing pages.
+2. **Magic bytes**: los primeros 4 bytes del archivo son exactamente `%PDF-`. Filtra archivos binarios que no son PDF pero salen con MIME correcto (raro pero ha pasado con mirrors adversariales).
+3. **Tamaño ≥ 50 KB**. Filtra stubs / placeholders que algunos proxies devuelven cuando el upstream no tiene el paper.
+4. **`pdfplumber.open()` parsea sin excepción**. Filtra PDFs corruptos, truncados, o encriptados sin password.
+
+Si los 4 pasan, el PDF se considera válido y se adjunta. Si alguno falla, se loguea con la razón (`content_type_mismatch`, `magic_mismatch`, `too_small`, `parse_failed`) y se continúa a la siguiente fuente.
+
+### 10.4 Circuit breaker por fuente
+
+Mirrors fuera de servicio o saturados pueden tragarse todo el budget wall-clock del ciclo (`S2_PDF_FETCH_MAX_MINUTES_WEEKLY`) antes de rendirse. Para acotar el daño: **contador in-memory por fuente dentro del `run_fetch_cycle()`**. Cada falla (timeout, HTTP error ≠ 2xx, verificación §10.3 fallida) incrementa el contador de esa fuente. Al alcanzar **5 fallas consecutivas** en la misma sesión → saltar esa fuente para el resto del ciclo y loguear `s2.pdf_cascade.source_circuit_open { source, consecutive_failures }`. El contador se resetea al próximo ciclo del worker.
+
+**Configurable**: `S2_PDF_FETCH_CIRCUIT_BREAKER_THRESHOLD=5` (default). Setearlo a `0` desactiva el circuit breaker (útil si una fuente rota intermitentemente y querés que igual lo intente cada vez; no recomendado para Sci-Hub / LibGen).
+
+**Por qué consecutivas y no "5 fallas en la sesión"**: una fuente que falla una vez cada 20 intentos (5% fallo) sigue siendo útil; una fuente que falla 5 seguidas probablemente está caída completa. El circuit breaker mide el modo "caída completa" sin castigar la intermitencia normal.
+
 ---
 
 ## 11. Roadmap por sprints
@@ -557,6 +576,9 @@ S2_PDF_SOURCES=openaccess,doi,annas,libgen,scihub,rss
 S2_PDF_FETCH_MAX_ATTEMPTS_PER_CANDIDATE=6
 S2_PDF_FETCH_TIMEOUT_SECONDS=30
 S2_PDF_FETCH_MAX_MINUTES_WEEKLY=20
+# Circuit breaker: skip a source for the rest of the cycle after this
+# many consecutive failures. Setear a 0 desactiva el breaker. Ver §10.4.
+S2_PDF_FETCH_CIRCUIT_BREAKER_THRESHOLD=5
 
 # ──────────── S2 Dashboard ────────────
 S2_DASHBOARD_HOST=127.0.0.1
