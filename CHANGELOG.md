@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S1 Stage 04 — substages 04b + 04c** (#6, second of three PRs for
+  Stage 04): `zotai.s1.stage_04_enrich.run_enrich(substage="04b")` and
+  `run_enrich(substage="04c")` now extend the cascade with title fuzzy
+  matching against OpenAlex (04b) and Semantic Scholar (04c). Per-item
+  flow for both: `extract_probable_title(pdf)` → provider's search API →
+  pick the best candidate with `rapidfuzz.fuzz.token_set_ratio >= 85`
+  (new `_FUZZ_THRESHOLD` constant) → map to Zotero payload → the shared
+  `_create_parent_and_reparent` helper (extracted from 04a's
+  `_retry_route_a`) creates a parent item (with ADR 014 dedup on the
+  matched DOI) and reparents the orphan attachment under it. On success
+  the item advances to `stage_completed=4, import_route='A'` — same
+  post-state as 04a. When `extract_probable_title` returns `None`
+  (generic heading or pathological page-1 layout), the row is recorded
+  with status `skipped_generic_title` and the item waits for the next
+  substage; when every candidate scores below threshold, status
+  `no_progress`. **04c mapper** is a new private helper
+  `map_semantic_scholar_to_zotero` that mirrors the shape of
+  `stage_03_import.map_openalex_to_zotero`: quality gate on non-empty
+  title + non-empty authors, default `itemType=journalArticle` (Semantic
+  Scholar doesn't expose structured types), DOI pulled from
+  `externalIds.DOI`. `EnrichStatus` gains `enriched_04b`, `enriched_04c`,
+  `skipped_generic_title`; `EnrichResult` gains `items_enriched_04b`,
+  `items_enriched_04c`, `items_skipped_generic_title`. **CLI**
+  `zotai s1 enrich --substage {04a|04b|04c}` is wired; `04d` and `04e`
+  still print the "not yet implemented" banner pending PR 3/3. **Client
+  change** in `SemanticScholarClient.search_paper`: new kw-only `fields`
+  param (default `"title,authors,year,venue,abstract,externalIds"`) so
+  callers receive enough fields to build a Zotero payload — the Semantic
+  Scholar API returns only `paperId + title` by default. Covered by 12
+  new tests (21 total in `tests/test_s1/test_stage_04.py`, renamed from
+  `test_stage_04_04a.py`): 04b happy path (best fuzzy wins over
+  near-miss), 04b below-threshold → `no_progress`, 04b generic title,
+  04b quality gate, 04b dedup with existing PDF (ADR 014), 04b
+  idempotent re-run, 04c happy path (+ regression guard that
+  `search_paper` is called with the new `fields` param), 04c match
+  without DOI, three direct mapper tests, 04d/04e still raise
+  `NotImplementedError`. Full suite: 145 passed (was 133). `mypy
+  --strict` clean on the modified files. Follow-up PR 3/3: 04d + 04e +
+  full cascade orchestrator (`--substage all`) + ADRs 005 / 008.
+
 - **S2 settings — ADR 015 / ADR 017 env vars surfaced in `S2Settings`**:
   nine knobs that `.env.example` and `plan_02` §12 already document now
   round-trip through `zotai.config.S2Settings` instead of being silently
