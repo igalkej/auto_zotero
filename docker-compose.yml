@@ -5,9 +5,17 @@
 #   - dashboard  : long-running S2 FastAPI app + scheduled worker
 #
 # Volumes persist across runs:
-#   - ./workspace : state.db, candidates.db, staging/, reports/, chroma_db/
+#   - ./workspace : state.db, candidates.db, staging/, reports/
 #   - ./config    : feeds.yaml, taxonomy.yaml, scoring.yaml
 #   - ./data      : source PDFs (read-only for the container)
+#
+# ChromaDB lives on the host at ${ZOTERO_MCP_CHROMA_HOST_PATH:-~/.config/zotero-mcp/chroma_db}
+# (the path `zotero-mcp setup` plants by default) and is bind-mounted
+# read-write into the dashboard service at /workspace/chroma_db. S2 owns
+# writes to it (per ADR 015); zotero-mcp serve on the host reads from
+# the same path. The onboarding service deliberately does NOT mount it —
+# S1 has no reason to touch ChromaDB. See ADR 011 (mount mechanism,
+# amended for :rw) + ADR 015 (ownership inversion).
 #
 # Networking: bridge (default). Zotero Desktop's local API lives on the
 # host at localhost:23119 and is reached from inside the container as
@@ -44,6 +52,10 @@ services:
     volumes:
       - ./workspace:/workspace
       - ./config:/app/config
+      # ChromaDB shared with `zotero-mcp serve` on the host. S2 writes
+      # (owner per ADR 015), zotero-mcp serve reads. ADR 011 documents
+      # the mechanism; the path on the host is overridable via .env.
+      - ${ZOTERO_MCP_CHROMA_HOST_PATH:-${HOME}/.config/zotero-mcp/chroma_db}:/workspace/chroma_db:rw
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
