@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S2 settings — ADR 015 / ADR 017 env vars surfaced in `S2Settings`**:
+  nine knobs that `.env.example` and `plan_02` §12 already document now
+  round-trip through `zotai.config.S2Settings` instead of being silently
+  dropped by `extra="ignore"`. Fields added with defaults matching
+  `.env.example`: `max_embed_per_cycle=50`, `safe_delete_ratio=0.10`,
+  `max_cost_usd_backfill=3.0`, `query_bm25_weight=0.4`,
+  `pdf_fetch_max_attempts_per_candidate=6`,
+  `pdf_fetch_timeout_seconds=30`, `pdf_fetch_max_minutes_weekly=20`,
+  `pdf_fetch_circuit_breaker_threshold=5`, `worker_disabled=False`.
+  Validators enforce the documented ranges: `_positive` (>=1) extended
+  to cover `max_embed_per_cycle` +
+  `pdf_fetch_max_attempts_per_candidate` +
+  `pdf_fetch_timeout_seconds` + `pdf_fetch_max_minutes_weekly`; new
+  `_non_negative` (>=0) on `max_cost_usd_backfill` and
+  `pdf_fetch_circuit_breaker_threshold` (the latter accepts 0 because
+  plan_02 §10.4 documents `0` as the way to disable the breaker); new
+  `_unit_interval` on `safe_delete_ratio` and `query_bm25_weight`. No
+  runtime code consumes these yet — S2 Sprint 1 (#12) is the first
+  consumer; the point of this PR is to keep the CLAUDE.md "fail-loud"
+  principle: users who set these in `.env` today (following
+  `.env.example`) are heard by the settings layer instead of being
+  silently ignored. Covered by 7 new tests in `tests/test_config.py`
+  (defaults, env reads including `threshold=0` and `worker_disabled`,
+  plus validator rejections for out-of-range values). Full suite: 133
+  passed; `mypy --strict src/zotai/config.py` clean.
+
 - **S1 Stage 04 — substage 04a** (#6, first of three PRs for Stage 04):
   `zotai.s1.stage_04_enrich.run_enrich(substage="04a")` walks items with
   `import_route='C' AND stage_completed=3` and runs aggressive
