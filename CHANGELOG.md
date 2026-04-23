@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Corpus LATAM reality check** (plan_01): §3 Etapa 03 and §3 Etapa 04
+  acknowledge explicitly that the "50-60% Ruta A" estimate assumes an
+  anglo-dominant corpus. For LATAM-heavy corpora (CEPAL Review, Desarrollo
+  Económico, Estudios Económicos, BID / CAF / BCRA papers, SciELO /
+  RedALyC journals), OpenAlex and Semantic Scholar coverage drops to
+  20-50% per journal, and the realistic split is closer to Ruta A 30-40% /
+  Ruta C 60-70%. Etapa 04 budget guidance updated: users with
+  LATAM-heavy corpora should bump `MAX_COST_USD_STAGE_04` from 2.00 to
+  ~4.00 before their first run. Quarantine success criterion amended:
+  <10% for anglo-dominant, <25% for LATAM-heavy, until the v1.1
+  extension with LATAM-specific metadata sources (REDIB / SciELO /
+  La Referencia / RedALyC) lands per the tracking issue. No code
+  changes — this is a realism adjustment to the spec.
+- **S2 PDF fetch cascade robustness** (plan_02 §10): two new subsections
+  added to the push flow to harden Sci-Hub / LibGen / Anna's Archive
+  against the operational reality that mirrors rotate domains, serve
+  HTML-of-error with 200 OK, and occasionally show CAPTCHA.
+  - **§10.3 Verificación post-descarga**: every source must deliver a
+    file that passes 4 checks in order — `Content-Type` starts with
+    `application/pdf`, magic bytes `%PDF-`, size ≥ 50 KB,
+    `pdfplumber.open()` parses without exception. Fail any → treat as
+    miss, try next source.
+  - **§10.4 Circuit breaker por fuente**: in-memory consecutive-failure
+    counter per source within one `run_fetch_cycle()`; 5 failures in a
+    row → skip that source for the rest of the cycle. Configurable via
+    `S2_PDF_FETCH_CIRCUIT_BREAKER_THRESHOLD=5` (default). Protects the
+    weekly wall-clock budget from being drained by a fully-down mirror.
+  `.env.example` and `plan_02` §12 reflect the new env var. Docs only;
+  implementation lands with Sprint 2 (#13).
 - **S2 query scoring — ADR 017**: `score_queries` moves from pure
   dense cosine to a convex hybrid with BM25 — `α·BM25 + (1-α)·cos`,
   default `α=0.4`. Fixes the known recall gap of dense-only retrieval
