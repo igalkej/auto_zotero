@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S1 Stage 04 — substages 04d + 04e + cascade orchestrator `--substage all`**
+  (#6, third of three PRs for Stage 04; closes #6):
+  - **04d — LLM extraction** (`gpt-4o-mini`). `zotai.s1.stage_04_enrich._enrich_04d_one`
+    sends the first two pages of the PDF to
+    `OpenAIClient.extract_metadata` (already wired in Phase 1), parses
+    the JSON response into a new Pydantic schema `LLMExtractedMetadata`
+    (with retry-once on malformed JSON), and maps it to a Zotero
+    payload via `map_llm_extraction_to_zotero`. The mapper's quality
+    gate rejects results with missing title, missing authors, or an
+    `item_type` outside the plan_01 §3.04d allow-list (`journalArticle`,
+    `book`, `bookSection`, `thesis`, `report`, `preprint`,
+    `conferencePaper`). Budget enforcement lives in `OpenAIClient`
+    (`MAX_COST_USD_STAGE_04`, overridable per-run via `--max-cost`);
+    `BudgetExceededError` is caught in the orchestrator so tripping
+    the cap routes remaining items directly to 04e without retrying
+    the LLM.
+  - **04e — Quarantine** (ADR 008). `_enrich_04e_one` ensures a
+    `Quarantine` collection exists on-demand (new
+    `ZoteroClient.create_collections` + `addto_collection` wrappers),
+    tags the orphan with `needs-manual-review`, adds it to the
+    collection, flips `Item.in_quarantine=True`, and writes a purpose-
+    built `reports/quarantine_report_<ts>.csv` with columns `sha256,
+    source_path, text_snippet, reason` — the triage surface plan_01
+    §3.04e prescribes.
+  - **Cascade orchestrator `--substage all`**. Per-item loop walks
+    `04a → 04b → 04c → 04d → 04e`, short-circuiting on the first
+    success. Quarantine is the terminal fallback when all free +
+    paid substages miss. Once the 04d budget trips during an `all`
+    run, the nonlocal `budget_exhausted` flag skips the LLM for
+    remaining items so they go straight to 04e.
+  - **Shared helper `_create_parent_and_reparent`** (extracted in PR
+    2/3) now serves 04a, 04b, 04c, and 04d uniformly: create parent
+    via `map_*_to_zotero` output, ADR 014 dedup on DOI, reparent orphan.
+  - **CLI** `zotai s1 enrich --substage {04a|04b|04c|04d|04e|all}`
+    with working `--max-cost` override; the banner for unsupported
+    values is removed.
+  - **`EnrichStatus`** adds `enriched_04d`, `quarantined_04e`,
+    `budget_exceeded`. **`EnrichResult`** adds `items_enriched_04d`,
+    `items_quarantined`, `quarantine_csv_path: Path | None`.
+  - **ADRs** `005-gpt-4o-mini-tagging-extraction.md` and
+    `008-quarantine-in-s1.md` — retrospective, closing the two
+    plan_00 §5 entries that were pending.
+  - Covered by 13 new tests (34 total in `tests/test_s1/test_stage_04.py`):
+    04d happy path, retry-once on malformed JSON, retries exhausted,
+    budget exceeded, invalid item_type; 04e happy path (collection
+    created, tagged, CSV written), reuses existing Quarantine; cascade
+    early-exit (04a hits → no LLM), cascade falls through to 04d,
+    cascade quarantines on exhaustion, cascade budget-tripped routes
+    remaining items to 04e; three direct mapper tests; Stage aborts
+    cleanly without `OPENAI_API_KEY` on `--substage 04d`. Full suite:
+    **158 passed** (was 145). `mypy --strict` clean on modified files.
+
 - **S1 Stage 04 — substages 04b + 04c** (#6, second of three PRs for
   Stage 04): `zotai.s1.stage_04_enrich.run_enrich(substage="04b")` and
   `run_enrich(substage="04c")` now extend the cascade with title fuzzy

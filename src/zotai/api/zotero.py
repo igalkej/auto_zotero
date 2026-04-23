@@ -113,5 +113,34 @@ class ZoteroClient:
             return True
         return bool(self._client.add_tags(item, *tags))
 
+    def create_collections(
+        self, payload: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Create Zotero collections; returns pyzotero's ``{success, ...}`` shape.
+
+        Each dict must contain a ``name`` key. Used by Stage 04e to ensure
+        the ``Quarantine`` collection exists on-demand (ADR 008).
+        """
+        if self.dry_run:
+            log.info(
+                "zotero.create_collections.dry_run",
+                names=[p.get("name") for p in payload],
+            )
+            return {"success": {}, "unchanged": {}, "failed": {}}
+        return cast(dict[str, Any], self._client.create_collections(payload))
+
+    def addto_collection(
+        self, collection_key: str, item: dict[str, Any]
+    ) -> bool:
+        """Add an existing item to an existing collection."""
+        if self.dry_run:
+            log.info(
+                "zotero.addto_collection.dry_run",
+                collection=collection_key,
+                item_key=item.get("key"),
+            )
+            return True
+        return bool(self._client.addto_collection(collection_key, item))
+
 
 __all__ = ["ZoteroClient"]
