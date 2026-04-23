@@ -511,7 +511,7 @@ Modo `--yes` skippea confirmaciones (para CI o usuarios experimentados).
 ## 10. Fuera de alcance del S1
 
 Explícitamente pospuesto:
-- Indexación semántica con ChromaDB → parte del S3.
+- Indexación semántica con ChromaDB → responsabilidad de S2 (ver ADR 015). S1 no escribe a ChromaDB bajo ninguna circunstancia.
 - Dashboard web → parte del S2.
 - Integración con Better BibTeX export → post-v1.0.
 - Detección de duplicados entre preprint/published → v1.1 si hace falta.

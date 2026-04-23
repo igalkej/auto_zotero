@@ -44,6 +44,9 @@ Mantener la biblioteca Zotero sincronizada con el estado del arte de los temas d
 ┌───────────────────────────────────────────────────────────────┐
 │ Worker (scheduled, corre c/ N horas)                          │
 │  ┌──────────────────────────────────────────────────────┐     │
+│  │ 0. Reconcile ChromaDB (add missing, remove orphans)  │     │
+│  │    Mantiene el invariante: todo item no-cuarentenado │     │
+│  │    en Zotero tiene entrada en ChromaDB. Ver ADR 015. │     │
 │  │ 1. Fetch RSS de journals configurados                │     │
 │  │ 2. Parsear, deduplicar vs candidatos ya vistos       │     │
 │  │ 3. Para cada nuevo candidato:                        │     │
@@ -152,6 +155,16 @@ class TriageMetric(SQLModel, table=True):
     precision_observed: float  # accepted / (accepted + rejected)
 ```
 
+**Nota — ChromaDB no está en `candidates.db`**. Bajo ADR 015, S2 también
+es el owner del índice de embeddings persistido en ChromaDB
+(`/workspace/chroma_db`). Los embeddings de los items de la biblioteca
+viven ahí, no en `candidates.db`. El campo `score_semantic` de
+`Candidate` es solo el float derivado de la query del candidate contra
+ese índice. La lógica de escritura (embedding + upsert) y de
+mantenimiento del invariante vive en
+`src/zotai/s2/indexing.py` (módulo dedicado, ver §11 Sprint 1) y se
+documenta como contrato de schema en ADR 015 §6.
+
 ---
 
 ## 6. Sub-módulo: Feed ingestion
@@ -213,20 +226,21 @@ Cada criterio produce un score `[0, 1]`. El score compuesto es combinación pond
 
 **Alternativa más barata (sin LLM)**: keyword matching sobre abstract contra un vocabulary derivado de tags existentes. Más rápido, menos preciso. Implementar ambas, dejar la elección configurable.
 
-### 7.2 Score semántico (sprint 3, requiere S3 operativo)
+### 7.2 Score semántico (sprint 3)
 
 **Input**: candidate con `abstract`.
 **Output**: `score_semantic ∈ [0, 1]`.
 
 **Lógica**:
 1. Calcular embedding del `abstract` del candidate (OpenAI `text-embedding-3-large`, ~$0.00013/candidate).
-2. Query contra ChromaDB del S3 con `top_k=20`.
+2. Query contra ChromaDB con `top_k = semantic_scoring.top_k_corpus` (default 20).
 3. `score = mean(similarity_scores de los top-k)`.
 4. Normalizar: si la biblioteca tiene N papers y el candidate matchea fuerte con ≥10% de los papers temáticamente cercanos, score alto.
 
 **Implementación**:
-- Reutilizar la instancia de ChromaDB que construye `zotero-mcp` (path configurable).
-- Si ChromaDB no está poblada (S3 nunca corrió), score=0.5 (neutral).
+- Bajo ADR 015, ChromaDB es **mantenida por el propio S2** via reconciliación en cada ciclo del worker (paso 0 del diagrama §4). El path es `S2_CHROMA_PATH=/workspace/chroma_db`, montado read-write desde el host.
+- Si ChromaDB tiene **menos de `semantic_scoring.min_corpus_size` documentos** (default 50, configurable en `config/scoring.yaml`), `score_semantic = semantic_scoring.neutral_fallback` (default 0.5) sin intentar la query k-NN. Este caso solo se da si S1 nunca corrió, o si el primer `zotai s2 backfill-index` todavía no se ejecutó. En régimen normal el invariante de reconciliación mantiene el índice poblado y este fallback no se activa.
+- El threshold por count (en lugar de "está vacía") cubre el caso de bibliotecas chiquitas — un k-NN sobre 5 papers no es ruido informativo, mejor degradar.
 
 ### 7.3 Score por queries persistentes
 
@@ -326,6 +340,15 @@ def composite_score(c: Candidate, weights: Weights) -> float:
 **Lógica del job**:
 ```python
 async def run_fetch_cycle():
+    # Step 0 — reconcile ChromaDB so scoring queries hit a fresh index.
+    # The reconcile is bounded (S2_MAX_EMBED_PER_CYCLE) and safe-guarded
+    # for deletes (S2_SAFE_DELETE_RATIO). Errors are logged but do not
+    # abort the cycle — score_semantic degrades to neutral_fallback if
+    # the corpus_size threshold isn't met after reconcile. See ADR 015.
+    reconcile_embeddings(zot_client, chroma_collection, openai_client,
+                         max_per_cycle=settings.s2.max_embed_per_cycle,
+                         safe_delete_ratio=settings.s2.safe_delete_ratio)
+
     for feed in get_active_feeds():
         try:
             entries = fetch_and_parse(feed)
@@ -343,7 +366,9 @@ async def run_fetch_cycle():
             feed.save()
 ```
 
-**Budget**: cada candidato cuesta ~$0.0005 en embeddings + scoring. Para 30 candidates/ciclo × 4 ciclos/día × 30 días = 3600/mes → ~$2/mes.
+**Budget**: cada candidato cuesta ~$0.0005 en embeddings + scoring. Para 30 candidates/ciclo × 4 ciclos/día × 30 días = 3600/mes → ~$2/mes. Sumar ~$0.01-0.05/ciclo de reconciliación incremental sobre la biblioteca (típicamente 0-3 items nuevos por ciclo en régimen). El backfill inicial (`zotai s2 backfill-index`) tiene su propio cap `S2_MAX_COST_USD_BACKFILL=3.00`. Ver ADR 015 §8.
+
+**Comando manual `zotai s2 reconcile`**: dispara un solo ciclo de reconciliación sin fetch de RSS — útil para debug, para forzar la propagación de un push reciente, o para usuarios que prefieren disparar el reconcile desde un cron externo independiente del worker. Usa los mismos defaults de `.env` que el ciclo del worker.
 
 ---
 
@@ -379,22 +404,25 @@ Se dispara cuando un candidate se marca `accepted`.
 - Push falla (API error, red): retry con backoff, eventualmente marcar `push_failed`, mostrar en dashboard.
 - Colección `Inbox S2` renombrada por el usuario entre runs: la próxima corrida crea una nueva con el nombre canónico — no buscamos por nombre viejo. Si el usuario quiere renombrar persistentemente, también cambia `S2_ZOTERO_INBOX_COLLECTION` en `.env`.
 
+**Nota — el push no escribe a ChromaDB directamente**. La escritura a ChromaDB ocurre en el siguiente ciclo de reconciliación del worker (paso 0 del diagrama §4 / pseudocódigo §9), que detecta el nuevo item en Zotero y lo embebe. Esto mantiene un único path de escritura a ChromaDB, simple de testear y auditar (ver ADR 015). El precio: hay una ventana de hasta `S2_FETCH_INTERVAL_HOURS` entre el push y la disponibilidad del item en queries semánticas — aceptable para el flujo de S3 (Claude Desktop), donde el usuario raramente consulta sobre papers que aceptó hace minutos.
+
 ---
 
 ## 11. Roadmap por sprints
 
-### Sprint 1 (3-5 días): Captura bruta
+### Sprint 1 (3-5 días): Captura bruta + indexación
 
-**Objetivo**: el worker captura de feeds, persiste en DB, el dashboard los muestra sin scoring.
+**Objetivo**: el worker captura de feeds, persiste en DB, el dashboard los muestra sin scoring. **El módulo de indexación (ADR 015) aterriza en este sprint** porque Sprint 2 lo necesita para `score_semantic` ya en su cuna.
 
 - [ ] `config/feeds.yaml` inicial con 5-10 journals.
 - [ ] `src/zotai/s2/feeds.py` con RSS parsing.
 - [ ] `candidates.db` con schema.
-- [ ] `src/zotai/s2/worker.py` con fetch cycle básico.
-- [ ] Dashboard minimal: `/inbox` muestra lista sin scoring ni triage.
-- [ ] CLI: `zotai s2 fetch-once` para testing manual.
+- [ ] `src/zotai/s2/indexing.py` con `reconcile_embeddings()`. Schema de ChromaDB según ADR 015 §6. Tests con ChromaDB temporal.
+- [ ] `src/zotai/s2/worker.py` con fetch cycle básico, llamando a `reconcile_embeddings()` en el paso 0 antes del fetch.
+- [ ] CLI: `zotai s2 fetch-once`, `zotai s2 backfill-index`, `zotai s2 reconcile`.
+- [ ] Dashboard minimal: `/inbox` muestra lista sin scoring ni triage. `/metrics` ya muestra `chroma_docs_count`, `chroma_last_reconcile_at`, `chroma_pending_embeddings`.
 
-**Deliverable**: ver candidatos fluir al inbox tras ejecutar fetch.
+**Deliverable**: ver candidatos fluir al inbox tras ejecutar fetch, y la biblioteca poblada en ChromaDB tras `backfill-index`.
 
 ### Sprint 2 (3-5 días): Scoring básico + triage
 
@@ -412,12 +440,11 @@ Se dispara cuando un candidate se marca `accepted`.
 
 **Objetivo**: criterio de similitud semántica funciona, dashboard usable semanal.
 
-- [ ] Integración con ChromaDB del S3 (read-only).
-- [ ] `score_semantic` en scoring.py.
+- [ ] `score_semantic` en scoring.py — query contra la ChromaDB que el indexing module mantiene desde Sprint 1 (ADR 015). Ya no hace falta "integración con S3"; la ChromaDB es local a S2.
 - [ ] Breakdown visual de scores en cada card.
 - [ ] Keyboard shortcuts en inbox.
 - [ ] Bulk actions.
-- [ ] `/metrics` con precision observada.
+- [ ] `/metrics` con precision observada + breakdown por `source` de los embeddings (fulltext / abstract / title_only).
 - [ ] PDF download en push (best-effort).
 
 **Deliverable**: sistema usable semanalmente, métricas visibles.
@@ -443,16 +470,30 @@ Se dispara cuando un candidate se marca `accepted`.
 # ──────────── S2 Worker ────────────
 S2_FETCH_INTERVAL_HOURS=6
 S2_CANDIDATES_DB=/workspace/candidates.db
-# Container-side path. Montado desde la ChromaDB del host por el servicio
-# `dashboard` en docker-compose.yml. Ver ADR 011 y plan_03 §4.3 / §8.
+# Container-side path donde S2 escribe ChromaDB (owner per ADR 015).
+# Compose bind-mounts el path del host (ZOTERO_MCP_CHROMA_HOST_PATH) acá
+# con flag :rw. Read-only para `zotero-mcp serve` que corre en el host.
 S2_CHROMA_PATH=/workspace/chroma_db
-# Host-side source para el bind mount. Default coincide con el path que planta
-# `zotero-mcp setup`. Override si tenés ChromaDB en otra ubicación.
+# Host-side source para el bind mount. Default coincide con el path que
+# `zotero-mcp setup` espera leer. Cambiarlo en .env también requiere
+# coordinar con la config de zotero-mcp.
 ZOTERO_MCP_CHROMA_HOST_PATH=${HOME}/.config/zotero-mcp/chroma_db
 # Cambiar a `true` para deshabilitar APScheduler in-process y usar cron/Task
 # Scheduler externo. Ver ADR 012.
 S2_WORKER_DISABLED=false
 S2_ZOTERO_INBOX_COLLECTION=Inbox S2   # S2 crea la colección on-demand
+
+# ──────────── S2 Index reconciliation (ADR 015) ────────────
+# Max embeddings calculados por ciclo del worker. Limita costo y picos de
+# latencia; el residual converge en ciclos siguientes.
+S2_MAX_EMBED_PER_CYCLE=50
+# Safety threshold: si orphans/total > este ratio, NO borrar y requerir
+# intervención manual. Protege contra bugs de lectura de Zotero (ej. API
+# devuelve lista vacía erróneamente) que vaciarían ChromaDB por diff.
+S2_SAFE_DELETE_RATIO=0.10
+# Budget cap para el comando one-shot `zotai s2 backfill-index`. Independiente
+# del cap diario/mensual del worker.
+S2_MAX_COST_USD_BACKFILL=3.00
 
 # ──────────── S2 PDF fetch cascade ────────────
 S2_PDF_SOURCES=openaccess,doi,annas,libgen,scihub,rss
@@ -502,7 +543,10 @@ Cada una es un ticket para v1.1+.
 
 ## 15. Dependencias del S2
 
-- **S1** debe haber corrido: necesitamos biblioteca poblada para que el scoring funcione.
-- **S3** debe estar operativo: necesitamos ChromaDB para el score semántico. El acceso concreto se hace via bind mount read-only (`/workspace/chroma_db` dentro del container ← path del host). Ver ADR 011. Si ChromaDB está vacía o no existe todavía, `score_semantic=0.5` (neutral) y el dashboard sigue funcionando.
+- **S1** debe haber corrido: necesitamos biblioteca poblada para que el scoring funcione y para que el primer `backfill-index` tenga material que embebera.
+- **S2 es owner de ChromaDB** (ADR 015). El primer backfill se dispara con `zotai s2 backfill-index`. Los ciclos siguientes del worker mantienen el invariante "todo item no-cuarentenado en Zotero está indexado" via reconciliación por diff. El bind mount es `:rw` (`/workspace/chroma_db` dentro del container ← `${ZOTERO_MCP_CHROMA_HOST_PATH}` en el host). Ver ADR 011 (mecanismo del mount, amended) + ADR 015 (ownership). Si el corpus indexado tiene <`semantic_scoring.min_corpus_size` documentos, `score_semantic=neutral_fallback` (default 0.5) y el dashboard sigue funcionando.
+- **S3 NO es prerequisito de S2** bajo ADR 015. S3 (`zotero-mcp serve`) es lector puro del mismo store. Si el usuario nunca configuró S3, S2 funciona igual; lo único que pierde el usuario es la consulta conversacional desde Claude Desktop.
 - **Zotero abierto** con API local (igual que S1). S2 crea la colección `Inbox S2` (o el nombre en `S2_ZOTERO_INBOX_COLLECTION`) on-demand e idempotentemente en el primer push.
-- **Worker y dashboard corriendo**: por default APScheduler in-process en el mismo container del dashboard (ADR 012). Usuarios que no mantienen el dashboard 24/7 pueden setear `S2_WORKER_DISABLED=true` y usar cron / Task Scheduler externos (receta en `docs/setup-{linux,windows}.md`).
+- **Worker y dashboard corriendo**: por default APScheduler in-process en el mismo container del dashboard (ADR 012). Usuarios que no mantienen el dashboard 24/7 pueden setear `S2_WORKER_DISABLED=true` y usar cron / Task Scheduler externos invocando `zotai s2 fetch-once` (receta en `docs/setup-{linux,windows}.md`); el `fetch-once` ejecuta el reconcile como paso 0 igual que el worker, así que el invariante de ChromaDB se mantiene en ambos paths.
+- **`pdfplumber`**: ya es dependencia de S1 (Etapa 01); S2 la reusa para extraer fulltext de los PDFs adjuntos a los items de Zotero al momento de embebera (ADR 015 §3.2 / §6).
+- **Schema de `zotero-mcp`**: S2 escribe a una ChromaDB que `zotero-mcp serve` (host) lee. La compatibilidad de schema fue validada empíricamente (Fase 2 del plan de implementación de ADR 015) y se documenta como contrato en ADR 015 §6. Cualquier upgrade futuro de `zotero-mcp` debe re-validarse.

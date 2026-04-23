@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Architecture (Fase 1 of ADR 015 — docs alignment)**: rippled the
+  S2-owns-embeddings inversion across all the documents that used to
+  describe the pre-ADR-015 ownership model.
+  - `plan_00_overview.md` §4 + §5: clarified that "S3" in the
+    S1 → S3 → S2 order means setup of `zotero-mcp serve` only — no
+    `update-db` is part of any operational flow under ADR 015. Decisions
+    table extended with rows 010-015 (was missing 010+).
+  - `plan_01_subsystem1.md` §10: line about ChromaDB in "Fuera de
+    alcance" inverted ("responsabilidad de S2 (ver ADR 015). S1 no
+    escribe a ChromaDB bajo ninguna circunstancia").
+  - `plan_02_subsystem2.md` §4 (architecture diagram), §5 (data model),
+    §7.2 (semantic score fallback now `min_corpus_size`-based, not
+    "empty"-based), §9 (worker pseudocode now opens with reconcile
+    step), §10 (push does not write ChromaDB directly), §11 (Sprint 1
+    grows the indexing module + `backfill-index` / `reconcile` CLI
+    deliverables; Sprint 3 simplified), §12 (new env vars
+    `S2_MAX_EMBED_PER_CYCLE`, `S2_SAFE_DELETE_RATIO`,
+    `S2_MAX_COST_USD_BACKFILL`), §15 (dependencies inverted: S2 is the
+    owner; S3 setup is no longer a prerequisite).
+  - `plan_03_subsystem3.md` §4.3 (ownership flipped, mount becomes
+    `:rw`), §5.2 (removed "Build del índice inicial" step), §7.1 (the
+    re-indexing section is now obsolete; the user is redirected to
+    `zotai s2 reconcile` / the worker's automatic cycle), §8
+    (S2/S3 integration direction inverted), §9 (deliverables: removed
+    `scripts/reindex-s3.{sh,ps1}`).
+  - `plan_glossary.md`: "Chroma DB" entry inverted; new entries for
+    "Reconciliación de embeddings" and "Backfill de índice".
+  - `CLAUDE.md` §"Contratos entre subsistemas": the diagram now shows
+    ChromaDB explicitly with arrows from S2 (write) and to S3 (read);
+    the "solo a través de Zotero" claim softened to "ChromaDB is the
+    one exception — S2-owned derived state".
+  - `.env.example`: `S2_CHROMA_PATH` comment inverted to mark `:rw`
+    ownership; added `S2_MAX_EMBED_PER_CYCLE`, `S2_SAFE_DELETE_RATIO`,
+    `S2_MAX_COST_USD_BACKFILL` block with cross-references to ADR 015.
+  - `config/scoring.yaml`: added `semantic_scoring.min_corpus_size: 50`.
+  - `src/zotai/cli.py`: stubbed `zotai s2 backfill-index` and
+    `zotai s2 reconcile` (point to Phase 11 / #12 like the rest of S2
+    stubs); enriched the `s2 fetch-once` docstring to call out the
+    reconcile step.
+  - No Python runtime code modified — purely editorial + CLI stubs +
+    one YAML key. Tests still pass (115). Code module + empirical
+    validation come in subsequent PRs per the orden de trabajo.
+
 - **Architecture — ADR 015**: S2 becomes the owner of the ChromaDB
   embeddings index; S3 (`zotero-mcp serve`) is reduced to a pure
   reader. The project no longer invokes `zotero-mcp update-db` in

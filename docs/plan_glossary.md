@@ -56,7 +56,13 @@ SQLite con el estado del pipeline S1. Ubicación: `/workspace/state.db` dentro d
 SQLite con candidates, feeds, queries. Separado del `state.db`. Ubicación: `/workspace/candidates.db`.
 
 **Chroma DB**
-Base vectorial gestionada por `zotero-mcp` para embeddings. Ubicación canónica: `~/.config/zotero-mcp/chroma_db/`. S3 la escribe, S2 la lee.
+Base vectorial para embeddings de los items de la biblioteca Zotero del usuario. Ubicación canónica: `~/.config/zotero-mcp/chroma_db/` en el host (path por default de `zotero-mcp setup`); montada al container de S2 como `/workspace/chroma_db:rw`. **S2 la escribe** (owner, ver ADR 015) via `reconcile_embeddings()` por ciclo del worker + el comando one-shot `zotai s2 backfill-index`. **S3 (`zotero-mcp serve`) la lee** para responder queries MCP desde Claude Desktop. No se ejecuta `zotero-mcp update-db` en ningún flujo del proyecto.
+
+**Reconciliación de embeddings** (S2)
+Proceso que corre en cada ciclo del worker como paso 0, antes del fetch de RSS y del scoring. Compara el conjunto de keys en Zotero con el conjunto de ids en ChromaDB; embebe lo faltante (limitado por `S2_MAX_EMBED_PER_CYCLE`) y borra huérfanos cuando el ratio está bajo `S2_SAFE_DELETE_RATIO` (safety contra bugs de lectura de Zotero que vaciarían el store). Implementa el invariante "todo item no-cuarentenado en Zotero está indexado en ChromaDB" del ADR 015. Idempotente: correr dos veces seguidas con el mismo estado produce el mismo resultado. Disparable manualmente con `zotai s2 reconcile` o como parte de `zotai s2 fetch-once`.
+
+**Backfill de índice** (S2)
+Comando `zotai s2 backfill-index`: misma lógica de reconciliación pero con `max_per_cycle` efectivamente sin límite, progress bar, y cap de costo separado (`S2_MAX_COST_USD_BACKFILL`, default 3.00). Es el primer comando que el usuario corre tras completar S1 + setup de S3 — pobla ChromaDB inicialmente para que `score_semantic` arranque con datos. Idempotente; re-correrlo es seguro y barato.
 
 **Clasificador académico / no-académico** (S1 Etapa 01)
 Filtro upstream del pipeline S1. Decide, para cada PDF encontrado bajo `PDF_SOURCE_FOLDERS`, si es material bibliográfico o material de descarte (facturas, DNIs, tickets, manuales, etc.). Estrategia híbrida en 3 ramas: (1) **accept** automático por heurística positiva — DOI / arXiv / ISBN / keywords académicos en páginas 1-3; (2) **reject** automático por heurística negativa — ≤2 páginas + ausencia de texto o keywords de facturación en primera página; (3) **ambiguos** resueltos por `gpt-4o-mini` con prompt corto. Ver `plan_01_subsystem1.md` §3 Etapa 01 y §3.1.
