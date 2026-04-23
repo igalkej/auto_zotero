@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **S2 query scoring — ADR 017**: `score_queries` moves from pure
+  dense cosine to a convex hybrid with BM25 — `α·BM25 + (1-α)·cos`,
+  default `α=0.4`. Fixes the known recall gap of dense-only retrieval
+  on short queries (3-7 tokens), which is exactly the shape of the
+  researcher's persistent queries. SQLite FTS5 (built-in since 3.9,
+  2015) backs BM25 — no new dependency. Changes: `plan_02` §7.3
+  rewritten with hybrid formula + FTS5 schema snippet, §5 notes the
+  new `candidate_fts` virtual table in `candidates.db` with sync
+  triggers, §12 adds `S2_QUERY_BM25_WEIGHT` env var, §15 adds SQLite
+  ≥ 3.9 to the dependency list. `config/scoring.yaml` gains a
+  `query_scoring.bm25_weight: 0.4` block. `.env.example` mirrors the
+  env var with guidance on the useful range. `plan_00` §5 decisions
+  table gets rows for ADR 016 (RRF, landing via #43) and ADR 017
+  (this PR). Docs + config only; implementation lands with Sprint 2
+  (#13). Calibration path (grid search over α once ≥100 decisions
+  exist) deferred to a successor ADR, same pattern as ADR 016.
+
 - **Architecture (Fase 1 of ADR 015 — docs alignment)**: rippled the
   S2-owns-embeddings inversion across all the documents that used to
   describe the pre-ADR-015 ownership model.

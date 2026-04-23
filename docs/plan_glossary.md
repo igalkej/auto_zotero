@@ -47,7 +47,13 @@ Las cinco sub-etapas de enrichment: 04a (identifiers), 04b (OpenAlex), 04c (Sema
 Proceso scheduled que corre cada N horas, fetcheando feeds y procesando candidates. Vive en el mismo container que el dashboard pero es un proceso separado (APScheduler).
 
 **Scoring** (S2)
-Cálculo de tres sub-scores (`tags`, `semantic`, `queries`) y su combinación ponderada en `score_composite`.
+Cálculo de tres sub-scores (`tags`, `semantic`, `queries`) y su combinación en `score_composite`. Bajo ADR 016 la combinación default es Reciprocal Rank Fusion (no promedio ponderado); bajo ADR 017 el sub-score `queries` es a su vez un hybrid de BM25 (SQLite FTS5, lexical) + dense cosine.
+
+**Hybrid retrieval** (S2)
+Combinación convex de BM25 lexical + dense semántico para queries persistentes cortas: `α·BM25 + (1-α)·cos`, default `α=0.4`. BM25 corre sobre una tabla virtual FTS5 `candidate_fts` en `candidates.db`; el componente dense reusa los embeddings de ChromaDB. Cierra el gap de recall de ~5-15 puntos que tiene dense-only en queries de 3-7 tokens. Ver ADR 017.
+
+**Reciprocal Rank Fusion (RRF)** (S2)
+Método default para `score_composite`: `sum(1/(k+rank_c(d)))` sobre los tres criterios (tags / semantic / queries), con k=60. Robusto a distribuciones distintas por criterio, sin pesos pre-datos, favorece candidates que rankean alto en cualquier criterio individual. Ver ADR 016.
 
 **State DB / state.db** (S1)
 SQLite con el estado del pipeline S1. Ubicación: `/workspace/state.db` dentro del container.
