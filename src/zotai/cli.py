@@ -261,12 +261,64 @@ def s1_import(
 
 @s1_app.command("enrich")
 def s1_enrich(
-    substage: Annotated[str | None, typer.Option("--substage")] = None,
-    max_cost: Annotated[float | None, typer.Option("--max-cost")] = None,
+    ctx: typer.Context,
+    substage: Annotated[
+        str,
+        typer.Option(
+            "--substage",
+            help=(
+                "Which enrichment substage to run. Only '04a' is implemented "
+                "in this PR; '04b', '04c', '04d', '04e', 'all' will land in "
+                "follow-up PRs. See plan_01 §3 Etapa 04."
+            ),
+        ),
+    ] = "04a",
+    max_cost: Annotated[
+        float | None,
+        typer.Option(
+            "--max-cost",
+            help=(
+                "Override MAX_COST_USD_STAGE_04 for this invocation. Only "
+                "applies once 04d (LLM extraction) lands; 04a is free."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Stage 04 — enrichment cascade (04a-04e)."""
-    _ = substage, max_cost
-    _not_implemented("s1 enrich", 5, 6)
+    from zotai.config import Settings
+    from zotai.s1.handler import StageAbortedError
+    from zotai.s1.stage_04_enrich import run_enrich
+
+    _ = max_cost  # reserved for 04d in follow-up PR
+
+    settings = Settings()
+    dry_run = bool(ctx.obj.get("dry_run", False)) or settings.behavior.dry_run
+
+    if substage != "04a":
+        typer.secho(
+            f"Substage '{substage}' is not yet implemented — only '04a' is "
+            "wired in this PR. '04b', '04c' (#NEXT_PR), '04d' + '04e' + "
+            "cascade orchestrator (#LAST_PR) follow.",
+            err=True,
+            fg=typer.colors.YELLOW,
+        )
+        raise typer.Exit(code=2)
+
+    try:
+        result = run_enrich(
+            substage="04a",
+            dry_run=dry_run,
+            settings=settings,
+        )
+    except StageAbortedError as exc:
+        typer.secho(f"Stage aborted: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(
+        f"processed={result.items_processed} failed={result.items_failed} "
+        f"enriched_04a={result.items_enriched_04a} "
+        f"no_progress={result.items_no_progress} csv={result.csv_path}"
+    )
 
 
 @s1_app.command("tag")
