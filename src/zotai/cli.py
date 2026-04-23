@@ -268,10 +268,11 @@ def s1_enrich(
             "--substage",
             help=(
                 "Which enrichment substage to run. '04a' (identifier "
-                "extraction), '04b' (OpenAlex fuzzy title match), and "
-                "'04c' (Semantic Scholar fuzzy title match) are wired; "
-                "'04d', '04e' and the cascade orchestrator 'all' land in "
-                "the follow-up PR. See plan_01 §3 Etapa 04."
+                "extraction), '04b' (OpenAlex fuzzy), '04c' (Semantic "
+                "Scholar fuzzy), '04d' (gpt-4o-mini extraction — costs "
+                "money, bounded by MAX_COST_USD_STAGE_04), '04e' "
+                "(Quarantine), or 'all' for the full per-item cascade "
+                "04a → 04b → 04c → 04d → 04e. See plan_01 §3 Etapa 04."
             ),
         ),
     ] = "04a",
@@ -280,29 +281,27 @@ def s1_enrich(
         typer.Option(
             "--max-cost",
             help=(
-                "Override MAX_COST_USD_STAGE_04 for this invocation. Only "
-                "applies once 04d (LLM extraction) lands; 04a/04b/04c are free."
+                "Override MAX_COST_USD_STAGE_04 for this invocation "
+                "(hard cap on 04d's LLM spend). Once the budget trips, "
+                "'all' routes remaining items directly to 04e."
             ),
         ),
     ] = None,
 ) -> None:
-    """Stage 04 — enrichment cascade (04a-04e)."""
+    """Stage 04 — enrichment cascade (04a-04e + 'all' orchestrator)."""
     from typing import cast
 
     from zotai.config import Settings
     from zotai.s1.handler import StageAbortedError
     from zotai.s1.stage_04_enrich import EnrichSubstage, run_enrich
 
-    _ = max_cost  # reserved for 04d in follow-up PR
-
     settings = Settings()
     dry_run = bool(ctx.obj.get("dry_run", False)) or settings.behavior.dry_run
 
-    if substage not in ("04a", "04b", "04c"):
+    if substage not in ("04a", "04b", "04c", "04d", "04e", "all"):
         typer.secho(
-            f"Substage '{substage}' is not yet implemented. Supported in "
-            "this PR: '04a' | '04b' | '04c'. '04d' + '04e' + cascade "
-            "orchestrator ('all') land in PR 3/3 of #6.",
+            f"Substage '{substage}' is not valid. Choose one of: "
+            "'04a' | '04b' | '04c' | '04d' | '04e' | 'all'.",
             err=True,
             fg=typer.colors.YELLOW,
         )
@@ -312,20 +311,28 @@ def s1_enrich(
         result = run_enrich(
             substage=cast(EnrichSubstage, substage),
             dry_run=dry_run,
+            max_cost=max_cost,
             settings=settings,
         )
     except StageAbortedError as exc:
         typer.secho(f"Stage aborted: {exc}", err=True, fg=typer.colors.RED)
         raise typer.Exit(code=2) from exc
 
+    quarantine_part = (
+        f" quarantine_csv={result.quarantine_csv_path}"
+        if result.quarantine_csv_path
+        else ""
+    )
     typer.echo(
         f"processed={result.items_processed} failed={result.items_failed} "
         f"enriched_04a={result.items_enriched_04a} "
         f"enriched_04b={result.items_enriched_04b} "
         f"enriched_04c={result.items_enriched_04c} "
+        f"enriched_04d={result.items_enriched_04d} "
+        f"quarantined={result.items_quarantined} "
         f"no_progress={result.items_no_progress} "
         f"skipped_generic_title={result.items_skipped_generic_title} "
-        f"csv={result.csv_path}"
+        f"csv={result.csv_path}{quarantine_part}"
     )
 
 
