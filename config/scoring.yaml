@@ -1,10 +1,24 @@
 # ─────────────────────────────────────────────────────────────
-# config/scoring.yaml — default weights for the S2 composite score.
-# Defaults match docs/plan_02_subsystem2.md §7.4.
-# Adjust via the dashboard at /config/weights once Phase 12 lands.
+# config/scoring.yaml — S2 scoring defaults. Matches plan_02 §7.4.
+# Adjustable via the dashboard at /config/weights once Phase 12 lands.
 # ─────────────────────────────────────────────────────────────
 version: 1
 
+composite_score:
+  # Method for combining score_tags / score_semantic / score_queries
+  # into score_composite. `rrf` (Reciprocal Rank Fusion) is the default
+  # per ADR 016: robust to distributional differences across criteria,
+  # no arbitrary weights, favors candidates that rank high on ANY
+  # criterion. `weighted_mean` is the legacy linear combination,
+  # documented for opt-in until calibration data exists.
+  method: rrf   # rrf | weighted_mean
+  # RRF's smoothing constant (Cormack et al. 2009). k=60 is the
+  # paper-standard default; rarely worth changing.
+  rrf_k: 60
+
+# Legacy weighted-mean weights. Ignored when composite_score.method=rrf.
+# Kept so users who set method=weighted_mean (e.g. for A/B comparison
+# against RRF) have sensible defaults to start from.
 weights:
   tags: 1.0
   semantic: 2.0

@@ -254,19 +254,34 @@ Cada criterio produce un score `[0, 1]`. El score compuesto es combinación pond
 
 ### 7.4 Score compuesto
 
+**Método default: Reciprocal Rank Fusion (RRF)** sobre los tres scores por criterio. Ver ADR 016 para el rationale completo — resumen: un promedio ponderado destruye señales ortogonales (un paper con `queries=0.9` pero `tags=0.1, semantic=0.1` se entierra bajo pesos arbitrarios); RRF es robusto a distribuciones distintas de cada criterio y favorece a quienes aparecen arriba en *cualquiera* de los tres.
+
 ```python
-def composite_score(c: Candidate, weights: Weights) -> float:
-    return (
-        weights.tags * c.score_tags
-        + weights.semantic * c.score_semantic
-        + weights.queries * c.score_queries
-    ) / (weights.tags + weights.semantic + weights.queries)
+# Reciprocal Rank Fusion (Cormack, Clarke, Büttcher 2009).
+# Lower rank = better; k absorbs the noise at the tail.
+def composite_score(candidates: list[Candidate], k: int = 60) -> None:
+    for criterion in ("tags", "semantic", "queries"):
+        ranked = sorted(
+            candidates,
+            key=lambda c: getattr(c, f"score_{criterion}"),
+            reverse=True,
+        )
+        for rank, c in enumerate(ranked, start=1):
+            c.score_composite += 1.0 / (k + rank)
+    # Normalize to [0, 1] for UI and persistence.
+    max_rrf = max(c.score_composite for c in candidates) or 1.0
+    for c in candidates:
+        c.score_composite /= max_rrf
 ```
 
-**Weights default** (configurable en `config/scoring.yaml`):
-- `tags=1.0`
-- `semantic=2.0` (más importante, más discriminador)
-- `queries=2.0`
+**Configuración** (`config/scoring.yaml`, bloque `composite_score`):
+- `method: rrf` (default) | `weighted_mean` (legacy, documented for opt-in).
+- `rrf_k: 60` — constante estándar del paper original. Aumentarla suaviza, bajarla pesa más a los tops. Raramente hay que tocarla.
+- `weighted_mean` sigue disponible con `weights.{tags, semantic, queries}` por si el usuario quiere forzar calibración manual; no recomendado como default.
+
+**UI complement**: el dashboard `/inbox` ordena por `score_composite DESC` pero **expone también ordenamiento por criterio individual** (tabs o filtros). Un paper con `queries=0.9` (match perfecto a una query persistente) debe poder mostrarse primero aunque RRF lo ranke medio por tener `tags` y `semantic` bajos.
+
+**Calibración diferida**. RRF no necesita pesos — elimina la pregunta "¿cuánto vale tags vs semantic?". **Cuando haya ≥100 decisiones históricas** en `candidates.db` (una vez que el usuario lleve 2-3 meses de triage), un futuro ADR puede reintroducir pesos vía regresión logística sobre `score_tags, score_semantic, score_queries → {accepted, rejected}`, y comparar la precisión observada de RRF vs weighted-mean calibrado. **Calibrar escalas no es echo chamber** (el antipatrón que plan_02 §3 evita); sesgar el ranker con las aceptaciones del usuario sí lo sería — no es lo mismo. El dashboard `/metrics` ya expone `candidates_accepted / (accepted + rejected)` como precision observada por semana; esos datos son el input de la calibración futura.
 
 ---
 
