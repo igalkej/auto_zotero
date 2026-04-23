@@ -67,30 +67,44 @@ Ver `docs/plan_01_subsystem1.md` §3.1 para el detalle del clasificador.
 
 | Subsistema | Estado | Plan |
 |---|---|---|
-| S1 – Retroactive | 🟢 En implementación (Stages 01 inventory+classifier, 02 OCR, 03 import mergeados; próximo Stage 04 enrich [#6](https://github.com/igalkej/auto_zotero/issues/6)) | `docs/plan_01_subsystem1.md` |
+| S1 – Retroactive | 🟢 Funcional end-to-end (Stages 01-06 + `run-all` + `status` + Docker + setup docs). Taxonomía pendiente de customizar por cada investigador antes de aplicar tags reales. | `docs/plan_01_subsystem1.md` |
 | S3 – MCP access | 🟡 Spec, pendiente implementación ([#11](https://github.com/igalkej/auto_zotero/issues/11)) | `docs/plan_03_subsystem3.md` |
 | S2 – Prospective | 🟡 Spec, pendiente implementación ([#12](https://github.com/igalkej/auto_zotero/issues/12)–[#15](https://github.com/igalkej/auto_zotero/issues/15)) | `docs/plan_02_subsystem2.md` |
 
 ---
 
-## Quickstart (cuando esté implementado)
+## Quickstart
 
 ```bash
-git clone <repo>
+git clone https://github.com/igalkej/auto_zotero.git zotero-ai-toolkit
 cd zotero-ai-toolkit
 cp .env.example .env
-# editar .env con tus credenciales: ZOTERO_API_KEY, OPENAI_API_KEY, PDF_SOURCE_FOLDERS
+# editar .env con tus credenciales: ZOTERO_API_KEY, ZOTERO_LIBRARY_ID,
+# OPENAI_API_KEY, PDF_SOURCE_FOLDERS, USER_EMAIL
 
-# Arrancar S1 (carga inicial)
-docker compose run onboarding zotai s1 run-all
+# Status — siempre seguro; no escribe nada.
+docker compose --profile onboarding run --rm onboarding zotai s1 status
 
-# Configurar S3 (MCP para Claude Desktop) - guía manual
-# ver docs/s3-setup.md  (pendiente — Phase 10, #11)
+# Pipeline completo S1 (interactivo, prompts entre etapas).
+./scripts/run-pipeline.sh          # Linux / macOS
+.\scripts\run-pipeline.ps1         # Windows / PowerShell
 
-# Arrancar S2 (dashboard + worker)
+# Variantes útiles:
+./scripts/run-pipeline.sh --yes                       # sin prompts
+./scripts/run-pipeline.sh --yes --tag-mode preview    # stop antes de Stage 06
+./scripts/run-pipeline.sh --allow-template-taxonomy   # testing sin customizar taxonomía
+
+# Configurar S3 (MCP para Claude Desktop) — guía manual
+# ver docs/s3-setup.md (pendiente — Phase 10, #11)
+
+# Arrancar S2 dashboard + worker (pendiente — Phases 11-14, #12-#15)
 docker compose up dashboard
 # abrir http://localhost:8000
 ```
+
+Setup guiado por OS: [`docs/setup-linux.md`](docs/setup-linux.md) /
+[`docs/setup-windows.md`](docs/setup-windows.md). Problemas comunes:
+[`docs/troubleshooting.md`](docs/troubleshooting.md).
 
 ---
 
