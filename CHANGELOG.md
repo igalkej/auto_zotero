@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S1 Stage 04 — substage 04a** (#6, first of three PRs for Stage 04):
+  `zotai.s1.stage_04_enrich.run_enrich(substage="04a")` walks items with
+  `import_route='C' AND stage_completed=3` and runs aggressive
+  identifier extraction on the PDF's first 3 pages. When a *new* DOI is
+  found (i.e. one not already in `Item.detected_doi`), the function
+  retries Route A from Stage 03: `OpenAlexClient.work_by_doi` →
+  `map_openalex_to_zotero` (imported from stage_03) → `create_items` →
+  reparent the orphan attachment under the new parent via
+  `update_item({..., parentItem: new_parent_key})`. Dedup with ADR 014
+  applies: if an existing Zotero item already has the DOI + a PDF, we
+  link the `Item` row to that key but do NOT reparent (avoids
+  duplicating PDFs). Status matrix: `enriched_04a` / `no_progress` (no
+  new DOI, OpenAlex 404, or quality gate failed) / `failed` (network
+  error, missing orphan) / `dry_run` / `skipped_already_enriched`.
+  Per-item reports land in `reports/enrich_report_<ts>.csv` with columns
+  `sha256, source_path, zotero_item_key_before, zotero_item_key_after,
+  substage_resolved, new_doi, status, error`. CLI `zotai s1 enrich
+  [--substage 04a] [--dry-run]` is wired; other `--substage` values
+  exit with a "not yet implemented" message until the follow-up PRs.
+  Covered by 9 tests: happy path, no-new-DOI, DOI matches Stage 01's,
+  OpenAlex 404, quality gate fail, dedup + existing PDF (link without
+  reparent), dry-run, idempotent re-run, "substage 04b raises". Full
+  suite: 126 passed; `mypy --strict` clean.
+  Follow-up PRs: 04b + 04c in the next PR; 04d + 04e + full cascade
+  orchestrator + ADRs 005 + 008 in the third.
 - **ADR 015 Fase 2 validation tooling**:
   `scripts/validate_chromadb_schema.py` — standalone script that
   populates a ChromaDB with the schema ADR 015 §6 prescribes (Zotero-
