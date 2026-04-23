@@ -421,11 +421,42 @@ def s1_tag(
 
 @s1_app.command("validate")
 def s1_validate(
-    open_report: Annotated[bool, typer.Option("--open-report")] = False,
+    open_report: Annotated[
+        bool,
+        typer.Option(
+            "--open-report",
+            help="After writing the report, open the HTML in the default browser.",
+        ),
+    ] = False,
 ) -> None:
     """Stage 06 — generate validation report (HTML + CSV)."""
-    _ = open_report
-    _not_implemented("s1 validate", 7, 8)
+    import webbrowser
+
+    from zotai.config import Settings
+    from zotai.s1.handler import StageAbortedError
+    from zotai.s1.stage_06_validate import run_validate
+
+    settings = Settings()
+
+    try:
+        report = run_validate(settings=settings)
+    except StageAbortedError as exc:
+        typer.secho(f"Stage aborted: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
+
+    assert report.html_path is not None and report.csv_path is not None
+    typer.echo(
+        f"items={report.completeness.total_items} "
+        f"main={report.completeness.items_in_main} "
+        f"quarantine={report.completeness.items_in_quarantine} "
+        f"tagged={report.tag_distribution.items_tagged} "
+        f"issues={len(report.consistency_issues)} "
+        f"duplicates={len(report.duplicate_pairs)} "
+        f"cost=${report.cost_total_usd:.4f} "
+        f"html={report.html_path} csv={report.csv_path}"
+    )
+    if open_report:
+        webbrowser.open(report.html_path.as_uri())
 
 
 @s1_app.command("run-all")
