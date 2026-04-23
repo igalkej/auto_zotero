@@ -30,6 +30,7 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
             "LIBRARY_ID",
             "LIBRARY_TYPE",
             "LOCAL_API",
+            "LOCAL_API_HOST",
             "MODEL_TAG",
             "MODEL_EXTRACT",
             "EMBEDDING_MODEL",
@@ -66,6 +67,10 @@ def test_settings_load_with_defaults() -> None:
     s = Settings()
     assert s.zotero.library_type == "user"
     assert s.zotero.local_api is True
+    # Empty default means "use pyzotero's hardcoded localhost:23119"; the
+    # docker-compose layer sets host.docker.internal at the container env,
+    # so the settings layer stays OS-agnostic. See ADR 013.
+    assert s.zotero.local_api_host == ""
     assert s.openai.model_tag == "gpt-4o-mini"
     assert s.ocr.languages == "spa+eng"
     assert s.ocr.parallel_processes == 4

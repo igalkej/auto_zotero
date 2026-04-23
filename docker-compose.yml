@@ -8,6 +8,11 @@
 #   - ./workspace : state.db, candidates.db, staging/, reports/, chroma_db/
 #   - ./config    : feeds.yaml, taxonomy.yaml, scoring.yaml
 #   - ./data      : source PDFs (read-only for the container)
+#
+# Networking: bridge (default). Zotero Desktop's local API lives on the
+# host at localhost:23119 and is reached from inside the container as
+# `host.docker.internal:23119` via Compose's `extra_hosts` alias — works
+# uniformly on Linux (Docker 20.10+), macOS, and Windows. See ADR 013.
 
 services:
   onboarding:
@@ -15,15 +20,16 @@ services:
     image: zotai:latest
     profiles: ["onboarding"]
     env_file: .env
+    environment:
+      # Route pyzotero's local API client to the host's Zotero Desktop.
+      # Overridable in .env if the user runs Zotero on a different host.
+      ZOTERO_LOCAL_API_HOST: ${ZOTERO_LOCAL_API_HOST:-http://host.docker.internal:23119}
     volumes:
       - ./workspace:/workspace
       - ./config:/app/config
       - ./data:/data:ro
-    # Note: host networking keeps Zotero local-API reachable at
-    # http://localhost:23119 from inside the container on Linux. On macOS/Windows
-    # the container talks to `host.docker.internal` — override in .env:
-    #   ZOTERO_LOCAL_API_HOST=http://host.docker.internal:23119
-    network_mode: host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: ["zotai", "s1", "--help"]
     # Onboarding is interactive and short-lived: no healthcheck needed.
     healthcheck:
@@ -33,13 +39,16 @@ services:
     build: .
     image: zotai:latest
     env_file: .env
+    environment:
+      ZOTERO_LOCAL_API_HOST: ${ZOTERO_LOCAL_API_HOST:-http://host.docker.internal:23119}
     volumes:
       - ./workspace:/workspace
       - ./config:/app/config
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:8000:8000"
-    network_mode: host
-    command: ["uvicorn", "zotai.s2.dashboard.main:app", "--host", "127.0.0.1", "--port", "8000"]
+    command: ["uvicorn", "zotai.s2.dashboard.main:app", "--host", "0.0.0.0", "--port", "8000"]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "/app/scripts/healthcheck.py"]

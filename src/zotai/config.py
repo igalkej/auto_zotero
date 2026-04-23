@@ -58,6 +58,12 @@ class ZoteroSettings(_GroupBase):
     library_id: str = ""
     library_type: Literal["user", "group"] = "user"
     local_api: bool = True
+    # Override for pyzotero's hardcoded ``http://localhost:23119/api``. Used
+    # inside Docker bridge-mode containers where ``localhost`` is the
+    # container itself; Docker Compose's ``extra_hosts`` exposes the host
+    # as ``host.docker.internal`` on Linux/macOS/Windows uniformly. Empty
+    # string means "use pyzotero's default". See ADR 013.
+    local_api_host: str = ""
 
 
 class OpenAISettings(_GroupBase):
