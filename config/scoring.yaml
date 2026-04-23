@@ -28,3 +28,11 @@ semantic_scoring:
   # "empty / not empty") covers small libraries where k-NN over a handful
   # of papers would be uninformative noise. See ADR 015 §2.
   min_corpus_size: 50
+
+query_scoring:
+  # Convex hybrid of BM25 (lexical) and dense cosine: α·BM25 + (1-α)·cos.
+  # Default 0.4 per literature standard for short queries (Pyserini /
+  # Elastic / LangChain). Overridable at runtime via S2_QUERY_BM25_WEIGHT.
+  # See ADR 017 for rationale and why pure dense underperforms on
+  # ≤5-token queries.
+  bm25_weight: 0.4

@@ -89,6 +89,8 @@ Cada una con ADR correspondiente en `docs/decisions/`.
 | 013 | Bridge networking + `host.docker.internal` en lugar de `network_mode: host` | `network_mode: host` no funciona en Docker Desktop Mac/Win; bridge + `extra_hosts: host-gateway` es uniforme cross-platform. |
 | 014 | Stage 03 dedup: skip attach si el item existente ya tiene PDF | Respeta estado curado del usuario; agrega valor cuando solo había metadata sin PDF. |
 | 015 | **S2 es owner del índice de embeddings; S3 es lector puro** | Invierte ADR 006/009 parcialmente. Elimina trigger externo (cron / on-use) y la ventana de staleness. S2 mantiene el invariante via reconciliación por diff en cada ciclo del worker. Ver ADR 015. |
+| 016 | Reciprocal Rank Fusion default para `score_composite` de S2 | Promedio ponderado con pesos arbitrarios entierra señales ortogonales (ej. `queries=0.9, tags=0.1, semantic=0.1`). RRF (k=60) es rank-based, sin pesos pre-datos, favorece rank-alto en cualquier criterio. Weighted-mean queda como opt-in. |
+| 017 | Hybrid retrieval (BM25 + dense) para `score_queries` de S2 | Queries persistentes son cortas (3-7 tokens); dense puro underperforma por 5-15 recall points. SQLite FTS5 built-in provee BM25 sin nueva dep. α=0.4 literatura default; calibrar con ADR sucesor post-datos. |
 
 ---
 

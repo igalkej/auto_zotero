@@ -165,6 +165,15 @@ mantenimiento del invariante vive en
 `src/zotai/s2/indexing.py` (módulo dedicado, ver §11 Sprint 1) y se
 documenta como contrato de schema en ADR 015 §6.
 
+**Nota — tabla virtual FTS5 para hybrid query scoring** (ADR 017).
+Además de las tablas listadas arriba, `candidates.db` contiene una
+tabla virtual `candidate_fts(id, title, abstract)` construida con
+`fts5(... tokenize='unicode61 remove_diacritics 2')` y mantenida en
+sync vía triggers INSERT/UPDATE/DELETE sobre `Candidate`. Es la que
+responde la mitad BM25 del score híbrido en §7.3. Zero mantenimiento
+del usuario; los triggers se crean junto con el schema al
+`init_s2()`.
+
 ---
 
 ## 6. Sub-módulo: Feed ingestion
@@ -247,10 +256,36 @@ Cada criterio produce un score `[0, 1]`. El score compuesto es combinación pond
 **Input**: candidate, lista de `PersistentQuery`s activas.
 **Output**: `score_queries ∈ [0, 1]`.
 
-**Lógica**:
-1. Para cada query, computar match semántico: embedding(query) · embedding(candidate.abstract).
-2. Score final: `max(similarity_por_query)` o promedio ponderado por query weight.
-3. Si no hay queries activas, score=0.
+**Método: hybrid retrieval (BM25 + dense) por query** (ver ADR 017). Las queries persistentes suelen ser frases cortas (*"fiscal multipliers in emerging markets"*, *"informalidad laboral Argentina"*); en queries de ≤5 tokens la similitud puramente densa degrada — es un problema conocido de retrieval. La fusión convex de BM25 (lexical, exact-match friendly) + dense (semántico, paráfrasis friendly) mejora recall dramáticamente. SQLite tiene FTS5 built-in, así que no hace falta nueva dep.
+
+**Lógica** (para cada query activa `q` → candidate `c`):
+
+1. **BM25**: `SBM25(c, q) = bm25(candidate_fts, q)` sobre una tabla virtual `candidate_fts(id, title, abstract)` en `candidates.db` (FTS5). Normalizar a `[0,1]` con min-max sobre el batch del ciclo.
+2. **Dense**: `Sdense(c, q) = cos(embedding(q), embedding(c.abstract))`. `embedding(q)` se cachea por query para no re-embebera en cada ciclo. Normalizar el coseno de `[-1, 1]` a `[0, 1]` con `(cos + 1) / 2`.
+3. **Fusión**: `Squery(c, q) = α · SBM25 + (1 − α) · Sdense`, con `α = query_scoring.bm25_weight` (default 0.4, configurable en `config/scoring.yaml` y anulable per-run con `S2_QUERY_BM25_WEIGHT`).
+4. **Agregación sobre múltiples queries**: `score_queries(c) = max(Squery(c, q) por query q activa) * PersistentQuery.weight_q` con default `weight_q=1.0`. El `max` preserva la semántica "basta con matchear *una* query para ser relevante" que el spec original ya preveía.
+5. **Si no hay queries activas**: `score_queries = 0`.
+
+**Calibración de α**. La literatura (Pyserini, Elastic hybrid, LangChain EnsembleRetriever) sugiere `α ∈ [0.3, 0.5]` como punto de partida; 0.4 es razonable pre-datos. Igual que RRF (ADR 016), calibrar α con regresión logística queda para un ADR sucesor una vez que `candidates.db` acumule ≥100 decisiones con breakdowns por componente.
+
+**FTS5 setup** (detalle de implementación, se persiste en `candidates.db`):
+
+```sql
+CREATE VIRTUAL TABLE candidate_fts USING fts5(
+    id UNINDEXED,
+    title,
+    abstract,
+    tokenize = 'unicode61 remove_diacritics 2'  -- útil para español
+);
+
+-- Triggers para mantenerla sincronizada con la tabla Candidate.
+CREATE TRIGGER candidate_fts_insert AFTER INSERT ON candidate BEGIN
+    INSERT INTO candidate_fts(id, title, abstract) VALUES (new.id, new.title, new.abstract);
+END;
+-- (update + delete triggers análogos).
+```
+
+`remove_diacritics 2` hace que "política" matchee "politica" — útil para corpus mixto es/en donde los acentos son inconsistentes.
 
 ### 7.4 Score compuesto
 
@@ -495,6 +530,13 @@ S2_SAFE_DELETE_RATIO=0.10
 # del cap diario/mensual del worker.
 S2_MAX_COST_USD_BACKFILL=3.00
 
+# ──────────── S2 Query scoring (ADR 017) ────────────
+# Peso de BM25 en la fusión convex con dense: α·BM25 + (1−α)·cos. Default 0.4
+# (punto estándar de la literatura para queries cortas). También configurable
+# en config/scoring.yaml como `query_scoring.bm25_weight`; esta env var tiene
+# prioridad para experimentación per-run. Rango útil: [0.2, 0.6].
+S2_QUERY_BM25_WEIGHT=0.4
+
 # ──────────── S2 PDF fetch cascade ────────────
 S2_PDF_SOURCES=openaccess,doi,annas,libgen,scihub,rss
 S2_PDF_FETCH_MAX_ATTEMPTS_PER_CANDIDATE=6
@@ -550,3 +592,4 @@ Cada una es un ticket para v1.1+.
 - **Worker y dashboard corriendo**: por default APScheduler in-process en el mismo container del dashboard (ADR 012). Usuarios que no mantienen el dashboard 24/7 pueden setear `S2_WORKER_DISABLED=true` y usar cron / Task Scheduler externos invocando `zotai s2 fetch-once` (receta en `docs/setup-{linux,windows}.md`); el `fetch-once` ejecuta el reconcile como paso 0 igual que el worker, así que el invariante de ChromaDB se mantiene en ambos paths.
 - **`pdfplumber`**: ya es dependencia de S1 (Etapa 01); S2 la reusa para extraer fulltext de los PDFs adjuntos a los items de Zotero al momento de embebera (ADR 015 §3.2 / §6).
 - **Schema de `zotero-mcp`**: S2 escribe a una ChromaDB que `zotero-mcp serve` (host) lee. La compatibilidad de schema fue validada empíricamente (Fase 2 del plan de implementación de ADR 015) y se documenta como contrato en ADR 015 §6. Cualquier upgrade futuro de `zotero-mcp` debe re-validarse.
+- **SQLite ≥ 3.9 con FTS5** (ADR 017): las queries persistentes usan una tabla virtual FTS5 `candidate_fts` en `candidates.db` para el score BM25. SQLite 3.9 liberó FTS5 en 2015; cualquier Python 3.11 trae uno muy superior, así que no hay acción requerida del usuario — se documenta solo para cubrir el caso "builds exotics de SQLite sin soporte FTS5".
