@@ -39,8 +39,17 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
             "FETCH_INTERVAL_HOURS",
             "CANDIDATES_DB",
             "CHROMA_PATH",
+            "WORKER_DISABLED",
             "ZOTERO_INBOX_COLLECTION",
+            "MAX_EMBED_PER_CYCLE",
+            "SAFE_DELETE_RATIO",
+            "MAX_COST_USD_BACKFILL",
+            "QUERY_BM25_WEIGHT",
             "PDF_SOURCES",
+            "PDF_FETCH_MAX_ATTEMPTS_PER_CANDIDATE",
+            "PDF_FETCH_TIMEOUT_SECONDS",
+            "PDF_FETCH_MAX_MINUTES_WEEKLY",
+            "PDF_FETCH_CIRCUIT_BREAKER_THRESHOLD",
             "DASHBOARD_HOST",
             "DASHBOARD_PORT",
             "MAX_COST_USD_DAILY",
@@ -124,5 +133,79 @@ def test_s2_dashboard_port_rejects_negative(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("S2_DASHBOARD_PORT", "0")
+    with pytest.raises(Exception):
+        S2Settings()
+
+
+def test_s2_indexing_and_query_defaults() -> None:
+    """ADR 015 + ADR 017 knobs declared in `.env.example` round-trip through
+    ``Settings()`` instead of being silently dropped by ``extra='ignore'``.
+    """
+    s = S2Settings()
+    assert s.max_embed_per_cycle == 50
+    assert s.safe_delete_ratio == 0.10
+    assert s.max_cost_usd_backfill == 3.0
+    assert s.query_bm25_weight == 0.4
+    assert s.pdf_fetch_max_attempts_per_candidate == 6
+    assert s.pdf_fetch_timeout_seconds == 30
+    assert s.pdf_fetch_max_minutes_weekly == 20
+    assert s.pdf_fetch_circuit_breaker_threshold == 5
+    assert s.worker_disabled is False
+
+
+def test_s2_reads_indexing_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("S2_MAX_EMBED_PER_CYCLE", "200")
+    monkeypatch.setenv("S2_SAFE_DELETE_RATIO", "0.05")
+    monkeypatch.setenv("S2_MAX_COST_USD_BACKFILL", "5.0")
+    monkeypatch.setenv("S2_QUERY_BM25_WEIGHT", "0.6")
+    monkeypatch.setenv("S2_PDF_FETCH_CIRCUIT_BREAKER_THRESHOLD", "0")
+    monkeypatch.setenv("S2_WORKER_DISABLED", "true")
+    s = S2Settings()
+    assert s.max_embed_per_cycle == 200
+    assert s.safe_delete_ratio == 0.05
+    assert s.max_cost_usd_backfill == 5.0
+    assert s.query_bm25_weight == 0.6
+    # ``0`` is the documented way to disable the circuit breaker
+    # (plan_02 §10.4), so the non-negative validator must accept it.
+    assert s.pdf_fetch_circuit_breaker_threshold == 0
+    assert s.worker_disabled is True
+
+
+def test_s2_safe_delete_ratio_rejects_out_of_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("S2_SAFE_DELETE_RATIO", "1.5")
+    with pytest.raises(Exception):
+        S2Settings()
+
+
+def test_s2_query_bm25_weight_rejects_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("S2_QUERY_BM25_WEIGHT", "-0.1")
+    with pytest.raises(Exception):
+        S2Settings()
+
+
+def test_s2_max_embed_per_cycle_rejects_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("S2_MAX_EMBED_PER_CYCLE", "0")
+    with pytest.raises(Exception):
+        S2Settings()
+
+
+def test_s2_circuit_breaker_rejects_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("S2_PDF_FETCH_CIRCUIT_BREAKER_THRESHOLD", "-1")
+    with pytest.raises(Exception):
+        S2Settings()
+
+
+def test_s2_max_cost_backfill_rejects_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("S2_MAX_COST_USD_BACKFILL", "-1.0")
     with pytest.raises(Exception):
         S2Settings()

@@ -170,7 +170,13 @@ class BehaviorSettings(_GroupBase):
 
 
 class S2Settings(_GroupBase):
-    """Subsystem 2 — worker, dashboard, and PDF-cascade config."""
+    """Subsystem 2 — worker, dashboard, indexing, and PDF-cascade config.
+
+    The indexing / reconcile / PDF-fetch knobs land with Sprint 1 (#12); they
+    are declared here ahead of the code so setting them in ``.env`` today does
+    not silently no-op under ``extra="ignore"``. See ADR 015 (ownership) and
+    ADR 017 (hybrid query retrieval).
+    """
 
     model_config = SettingsConfigDict(
         env_prefix="S2_",
@@ -183,12 +189,25 @@ class S2Settings(_GroupBase):
     fetch_interval_hours: int = 6
     candidates_db: Path = Path("/workspace/candidates.db")
     chroma_path: Path = Path("/workspace/chroma_db")
+    worker_disabled: bool = False
     zotero_inbox_collection: str = "Inbox S2"
+    # Index reconciliation (ADR 015).
+    max_embed_per_cycle: int = 50
+    safe_delete_ratio: float = 0.10
+    max_cost_usd_backfill: float = 3.0
+    # Query scoring (ADR 017) — convex hybrid α·BM25 + (1-α)·cos.
+    query_bm25_weight: float = 0.4
+    # PDF fetch cascade (plan_02 §10).
     # ``NoDecode`` stops pydantic-settings 2.3+ from trying to JSON-parse the
     # comma-separated env value before our ``_split_csv`` validator runs.
     pdf_sources: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["openaccess", "doi", "annas", "libgen", "scihub", "rss"]
     )
+    pdf_fetch_max_attempts_per_candidate: int = 6
+    pdf_fetch_timeout_seconds: int = 30
+    pdf_fetch_max_minutes_weekly: int = 20
+    # ``0`` explicitly disables the breaker; see plan_02 §10.4.
+    pdf_fetch_circuit_breaker_threshold: int = 5
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8000
     max_cost_usd_daily: float = 0.50
@@ -201,11 +220,32 @@ class S2Settings(_GroupBase):
             return [s.strip().lower() for s in v.split(",") if s.strip()]
         return v
 
-    @field_validator("fetch_interval_hours", "dashboard_port")
+    @field_validator(
+        "fetch_interval_hours",
+        "dashboard_port",
+        "max_embed_per_cycle",
+        "pdf_fetch_max_attempts_per_candidate",
+        "pdf_fetch_timeout_seconds",
+        "pdf_fetch_max_minutes_weekly",
+    )
     @classmethod
     def _positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError("value must be >= 1")
+        return v
+
+    @field_validator("max_cost_usd_backfill", "pdf_fetch_circuit_breaker_threshold")
+    @classmethod
+    def _non_negative(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("value must be >= 0")
+        return v
+
+    @field_validator("safe_delete_ratio", "query_bm25_weight")
+    @classmethod
+    def _unit_interval(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("value must be in [0.0, 1.0]")
         return v
 
 
