@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S1 Stage 05 — tagging** (#7, closes the Stage 05 / Phase 6 issue):
+  `zotai.s1.stage_05_tag.run_tag` walks items with `stage_completed >= 4
+  AND in_quarantine=False AND zotero_item_key IS NOT NULL AND tags_json
+  IS NULL` (the last clause dropped by `--re-tag`), builds a metadata
+  dict from `Item.metadata_json`, and asks `OpenAIClient.tag_paper` to
+  return `{"tema": [...], "metodo": [...]}`. JSON validation goes
+  through a Pydantic schema with a retry-once on malformed output;
+  after the retry the item is flagged `llm_failed` and left without
+  tags. Strict taxonomy validation: ids not present in
+  `config/taxonomy.yaml` are dropped (not fatal) and surfaced in the
+  CSV's `tema_rejected` / `metodo_rejected` columns so the researcher
+  can spot hallucinations or taxonomy gaps. **Two modes**: `--preview`
+  writes the CSV only (no Zotero / no DB writes); `--apply` calls
+  `ZoteroClient.add_tags`, persists `Item.tags_json`, and advances
+  `stage_completed` to 5. The global `--dry-run` short-circuits writes
+  in either mode. **Taxonomy sanity gate**: the stage refuses to run
+  against `config/taxonomy.yaml` when `status: template` unless
+  `--allow-template-taxonomy` is passed (for deliberate integration
+  testing on the shipped template). Budget: `MAX_COST_USD_STAGE_05`
+  (default $1.00, typical ~$0.40 for 1000 items) with
+  `--max-cost` override. `BudgetExceededError` aborts the stage via
+  `StageAbortedError` with partial state preserved (already-tagged
+  items stay tagged; re-run with a higher cap picks up from where it
+  left off). New module: `src/zotai/s1/stage_05_tag.py`. New CLI:
+  `zotai s1 tag --preview|--apply [--re-tag] [--max-cost N]
+  [--allow-template-taxonomy]`. New tests: `tests/test_s1/test_stage_05.py`
+  with 17 cases covering taxonomy loader errors, template refusal +
+  override, preview / apply / dry-run semantics, strict validation,
+  retry-once on malformed JSON, eligibility (quarantined / already-
+  tagged / no-metadata skips), `--re-tag`, budget exceeded with
+  partial commit. Full suite: 175 passed (was 158). `mypy --strict`
+  clean on the modified files.
+
 - **S1 Stage 04 — substages 04d + 04e + cascade orchestrator `--substage all`**
   (#6, third of three PRs for Stage 04; closes #6):
   - **04d — LLM extraction** (`gpt-4o-mini`). `zotai.s1.stage_04_enrich._enrich_04d_one`
