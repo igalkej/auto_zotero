@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S1 Stage 06 — validation report** (#8, closes the Stage 06 / Phase 7 issue):
+  `zotai.s1.stage_06_validate.run_validate` aggregates the full S1 state
+  and writes two files into `reports/`:
+  - `s1_validation_<ts>.html` — navigable single-file report with
+    Zotero links for every flagged item, styled with inline CSS (no
+    external assets, no Jinja dependency).
+  - `s1_validation_<ts>.csv` — flat metric summary (one row per
+    metric) for cross-run diffing.
+  Sections: (1) completeness — counts of items with Zotero key / metadata
+  / tags / fulltext; (2) tag distribution with orphan-tag (<3 uses) and
+  dominant-tag (>30 % of tagged items) warnings; (3) consistency issues
+  — missing title, zero authors, year outside `[1900, today_year+1]`;
+  (4) potential duplicates — pairs with `rapidfuzz.fuzz.ratio > 90` and
+  same year, with Zotero links for side-by-side review; (5) Stage 01
+  filtering — counts from the latest `excluded_report_*.csv` + items
+  flagged `needs_review=True`; (6) costs — totals + per-stage-per-service
+  breakdown from `ApiCall`; (7) timings — per-stage wall-clock from
+  `Run`. The stage is read-only — never writes to Zotero, never mutates
+  `state.db`; safe to re-run. New CLI: `zotai s1 validate [--open-report]`
+  (the flag opens the HTML in the default browser via `webbrowser.open`).
+  Covered by 11 tests in `tests/test_s1/test_stage_06.py`: each
+  aggregator in isolation (completeness, tag distribution incl. malformed
+  JSON + orphan/dominant flagging, consistency, duplicates, cost
+  breakdown, latest-csv helper, Stage 01 filtering from a real CSV),
+  plus end-to-end smoke that checks HTML contents + CSV shape + empty-DB
+  edge case + timing capture. Full suite: **186 passed** (was 175).
+  `mypy --strict` clean.
+
 - **S1 Stage 05 — tagging** (#7, closes the Stage 05 / Phase 6 issue):
   `zotai.s1.stage_05_tag.run_tag` walks items with `stage_completed >= 4
   AND in_quarantine=False AND zotero_item_key IS NOT NULL AND tags_json
