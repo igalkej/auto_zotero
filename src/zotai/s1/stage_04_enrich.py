@@ -59,22 +59,25 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal
 
+from rapidfuzz import fuzz
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
 from zotai.api.openalex import OpenAlexClient
+from zotai.api.semantic_scholar import SemanticScholarClient
 from zotai.api.zotero import ZoteroClient
 from zotai.config import Settings
 from zotai.s1.handler import StageAbortedError
 from zotai.s1.stage_03_import import (
-    _existing_has_pdf_attachment,  # noqa: PLC2701 — see refactor note below
-    _find_existing_doi,  # noqa: PLC2701
+    _existing_has_pdf_attachment,
+    _find_existing_doi,
+    _split_name,
     map_openalex_to_zotero,
 )
 from zotai.state import Item, Run, init_s1, make_s1_engine
 from zotai.utils.fs import ensure_dir
 from zotai.utils.logging import bind, get_logger
-from zotai.utils.pdf import extract_text_pages
+from zotai.utils.pdf import extract_probable_title, extract_text_pages
 
 # TODO(refactor): _find_existing_doi and _existing_has_pdf_attachment
 # are reused across Stage 03 + 04a. A follow-up PR should extract them
@@ -86,6 +89,9 @@ log = get_logger(__name__)
 _STAGE: Final[int] = 4
 _PREREQ_STAGE: Final[int] = 3
 _PAGES_FOR_ID_EXTRACTION: Final[int] = 3
+# plan_01 §3 Stage 04b/c: ``rapidfuzz.fuzz.token_set_ratio >= 85`` gates
+# every fuzzy title match. Common constant avoids drift between 04b and 04c.
+_FUZZ_THRESHOLD: Final[int] = 85
 
 _CSV_COLUMNS: Final[tuple[str, ...]] = (
     "sha256",
@@ -101,11 +107,17 @@ _CSV_COLUMNS: Final[tuple[str, ...]] = (
 EnrichSubstage = Literal["04a", "04b", "04c", "04d", "04e"]
 EnrichStatus = Literal[
     "enriched_04a",
+    "enriched_04b",
+    "enriched_04c",
     "no_progress",
     "skipped_already_enriched",
+    "skipped_generic_title",
     "failed",
     "dry_run",
 ]
+_ENRICHED_STATUSES: Final[frozenset[str]] = frozenset(
+    {"enriched_04a", "enriched_04b", "enriched_04c"}
+)
 
 
 # ─── Identifier regexes (shared patterns reused from Stage 01 classifier) ──
@@ -157,8 +169,11 @@ class EnrichResult:
     items_processed: int
     items_failed: int
     items_enriched_04a: int
+    items_enriched_04b: int
+    items_enriched_04c: int
     items_no_progress: int
     items_skipped: int
+    items_skipped_generic_title: int
 
 
 def _utc_now() -> datetime:
@@ -247,6 +262,183 @@ def _find_extra_identifiers(text: str) -> dict[str, str]:
     return extras
 
 
+# ─── Semantic Scholar → Zotero mapping (04c) ──────────────────────────────
+
+
+def map_semantic_scholar_to_zotero(
+    paper: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Map a Semantic Scholar paper record to a Zotero item payload.
+
+    Returns ``None`` when the quality gate fails (missing title, missing
+    authors). Schema mirrors ``stage_03_import.map_openalex_to_zotero`` so
+    both mappers feed the same Zotero ``create_items`` endpoint. Semantic
+    Scholar does not expose a structured item type, so we default to
+    ``journalArticle`` — good enough for the fallback path; 04d's LLM can
+    correct it when the cascade reaches that far.
+    """
+    title = (paper.get("title") or "").strip()
+    if not title:
+        return None
+
+    raw_authors = paper.get("authors") or []
+    creators: list[dict[str, str]] = []
+    for entry in raw_authors:
+        if not isinstance(entry, dict):
+            continue
+        name = (entry.get("name") or "").strip()
+        if not name:
+            continue
+        first, last = _split_name(name)
+        creators.append(
+            {"creatorType": "author", "firstName": first, "lastName": last}
+        )
+    if not creators:
+        return None
+
+    year = paper.get("year")
+    date_str = str(year) if isinstance(year, int) else ""
+
+    venue_raw = paper.get("venue")
+    venue = venue_raw.strip() if isinstance(venue_raw, str) else ""
+
+    abstract_raw = paper.get("abstract")
+    abstract = abstract_raw.strip() if isinstance(abstract_raw, str) else ""
+
+    doi = _doi_from_ss_paper(paper) or ""
+
+    payload: dict[str, Any] = {
+        "itemType": "journalArticle",
+        "title": title,
+        "creators": creators,
+        "date": date_str,
+        "abstractNote": abstract,
+    }
+    if doi:
+        payload["DOI"] = doi
+    if venue:
+        payload["publicationTitle"] = venue
+    return payload
+
+
+def _doi_from_ss_paper(paper: dict[str, Any]) -> str | None:
+    """Extract a normalised DOI string from a Semantic Scholar paper, or None."""
+    ext = paper.get("externalIds") or {}
+    if not isinstance(ext, dict):
+        return None
+    raw = ext.get("DOI")
+    if not isinstance(raw, str):
+        return None
+    cleaned = raw.strip()
+    return cleaned or None
+
+
+def _doi_from_openalex_work(work: dict[str, Any]) -> str | None:
+    """Extract a normalised DOI from an OpenAlex work, or None."""
+    raw = work.get("doi")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    cleaned = _strip_doi_url(raw)
+    return cleaned or None
+
+
+def _pick_best_fuzzy_match(
+    query_title: str,
+    candidates: list[dict[str, Any]],
+    *,
+    title_key: str = "title",
+) -> tuple[dict[str, Any], float] | None:
+    """Return the top candidate scoring ``>= _FUZZ_THRESHOLD``, with its score.
+
+    Uses ``rapidfuzz.fuzz.token_set_ratio`` per plan_01 §3 Stage 04b.
+    Candidates with missing or empty titles are skipped. Returns ``None``
+    when no candidate clears the threshold — the caller then falls
+    through to the next substage.
+    """
+    best: tuple[dict[str, Any], float] | None = None
+    for cand in candidates:
+        candidate_title = cand.get(title_key)
+        if not isinstance(candidate_title, str) or not candidate_title.strip():
+            continue
+        score = float(fuzz.token_set_ratio(query_title, candidate_title))
+        if score < _FUZZ_THRESHOLD:
+            continue
+        if best is None or score > best[1]:
+            best = (cand, score)
+    return best
+
+
+# ─── Create parent + reparent orphan (shared by 04a / 04b / 04c) ──────────
+
+
+async def _create_parent_and_reparent(
+    item: Item,
+    payload: dict[str, Any],
+    *,
+    doi: str | None,
+    zotero_client: ZoteroClient,
+    dry_run: bool,
+) -> tuple[str | None, str | None]:
+    """Create (or dedup on ``doi``) a parent, then reparent the orphan under it.
+
+    Returns ``(new_parent_key, error)``. ADR 014 dedup policy: when an
+    existing Zotero item already has the DOI and already carries a PDF,
+    we link the Item row to that key and skip reparenting (no duplicate
+    PDFs). When the existing item has no PDF, we reparent our orphan
+    under it. When no existing item matches (or no DOI available at all),
+    we create a fresh parent and reparent.
+
+    Shared helper so 04a, 04b, and 04c follow identical Zotero semantics
+    after each finds its metadata through its own source.
+    """
+    if dry_run:
+        return "DRYRUN_PARENT", None
+
+    existing_parent: str | None = None
+    if doi:
+        existing_parent = _find_existing_doi(zotero_client, doi)
+
+    if existing_parent is not None:
+        if _existing_has_pdf_attachment(zotero_client, existing_parent):
+            log.info(
+                "stage_04.dedup.existing_item_with_pdf",
+                doi=doi,
+                existing_key=existing_parent,
+            )
+            return existing_parent, None
+        new_parent_key = existing_parent
+    else:
+        create_response = zotero_client.create_items([payload])
+        success = create_response.get("success") or {}
+        if not isinstance(success, dict) or not success:
+            return None, "create_items_no_success_key"
+        first = next(iter(success.values()))
+        if not isinstance(first, str) or not first:
+            return None, "create_items_bad_key"
+        new_parent_key = first
+
+    orphan_key = item.zotero_item_key
+    if orphan_key is None:
+        # Shouldn't happen — Stage 04 precondition is stage_completed=3.
+        return None, "orphan_key_missing"
+    try:
+        orphan = zotero_client.item(orphan_key)
+    except Exception as exc:
+        return None, f"fetch_orphan:{type(exc).__name__}:{exc}"
+
+    orphan_data = orphan.get("data") or {}
+    if not orphan_data:
+        return None, "orphan_data_missing"
+    updated = dict(orphan_data)
+    updated["parentItem"] = new_parent_key
+    try:
+        zotero_client.update_item(updated)
+    except Exception as exc:
+        return None, f"update_item:{type(exc).__name__}:{exc}"
+
+    return new_parent_key, None
+
+
 # ─── Route A retry — uses map_openalex_to_zotero from stage_03 ────────────
 
 
@@ -258,17 +450,16 @@ async def _retry_route_a(
     openalex_client: OpenAlexClient,
     dry_run: bool,
 ) -> tuple[str | None, dict[str, Any] | None, str | None]:
-    """Try to create a Zotero parent for ``new_doi`` and reparent the orphan.
+    """Resolve ``new_doi`` via OpenAlex, then create-parent + reparent.
 
-    Returns ``(new_parent_key, mapped_payload, error)``. ``new_parent_key``
-    is the parent item in Zotero after success, or ``None`` if anything
-    short-circuits. ``mapped_payload`` is the OpenAlex → Zotero mapping
-    we wrote (for persisting in ``Item.metadata_json``). ``error`` is a
-    human-readable reason on failure (quality gate, OpenAlex 404, ...).
+    Returns ``(new_parent_key, mapped_payload, error)`` — callers persist
+    ``mapped_payload`` in ``Item.metadata_json`` on success. ``error``
+    is a human-readable reason on failure (quality gate, OpenAlex 404,
+    Zotero create/update failures).
     """
     try:
         work = await openalex_client.work_by_doi(new_doi)
-    except Exception as exc:  # noqa: BLE001 — any network / parse failure
+    except Exception as exc:
         log.warning("stage_04a.openalex_error", doi=new_doi, error=str(exc))
         return None, None, f"openalex_error:{type(exc).__name__}:{exc}"
 
@@ -279,58 +470,16 @@ async def _retry_route_a(
     if payload is None:
         return None, None, "quality_gate_failed"
 
-    if dry_run:
-        return "DRYRUN_PARENT", payload, None
-
-    # Dedup: if Zotero already has an item with this DOI, reuse it.
-    existing_parent = _find_existing_doi(zotero_client, new_doi)
-    if existing_parent is not None:
-        if _existing_has_pdf_attachment(zotero_client, existing_parent):
-            # User already has this paper with a PDF. Reparent the orphan
-            # to the existing item anyway? No — ADR 014 says we should not
-            # duplicate PDFs. But we still want to link the Item row to
-            # the existing parent so Stage 05 can tag it and Stage 06
-            # surfaces it correctly.
-            log.info(
-                "stage_04a.dedup.existing_item_with_pdf",
-                doi=new_doi,
-                existing_key=existing_parent,
-            )
-            return existing_parent, payload, None
-        # Existing item has no PDF; reparent our orphan under it below.
-        new_parent_key = existing_parent
-    else:
-        # Create the new parent item.
-        create_response = zotero_client.create_items([payload])
-        success = create_response.get("success") or {}
-        if not isinstance(success, dict) or not success:
-            return None, None, "create_items_no_success_key"
-        first = next(iter(success.values()))
-        if not isinstance(first, str) or not first:
-            return None, None, "create_items_bad_key"
-        new_parent_key = first
-
-    # Reparent: update the orphan attachment to point at new_parent_key.
-    orphan_key = item.zotero_item_key
-    if orphan_key is None:
-        # Shouldn't happen — Stage 04 precondition is stage_completed=3.
-        return None, None, "orphan_key_missing"
-    try:
-        orphan = zotero_client.item(orphan_key)
-    except Exception as exc:  # noqa: BLE001
-        return None, None, f"fetch_orphan:{type(exc).__name__}:{exc}"
-
-    orphan_data = orphan.get("data") or {}
-    if not orphan_data:
-        return None, None, "orphan_data_missing"
-    updated = dict(orphan_data)
-    updated["parentItem"] = new_parent_key
-    try:
-        zotero_client.update_item(updated)
-    except Exception as exc:  # noqa: BLE001
-        return None, None, f"update_item:{type(exc).__name__}:{exc}"
-
-    return new_parent_key, payload, None
+    parent_key, error = await _create_parent_and_reparent(
+        item,
+        payload,
+        doi=new_doi,
+        zotero_client=zotero_client,
+        dry_run=dry_run,
+    )
+    if error is not None:
+        return None, None, error
+    return parent_key, payload, None
 
 
 # ─── Per-item substage 04a ────────────────────────────────────────────────
@@ -363,7 +512,7 @@ async def _enrich_04a_one(
 
     try:
         pages = extract_text_pages(pdf_path, max_pages=_PAGES_FOR_ID_EXTRACTION)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return (
             EnrichRow(
                 sha256=item.id,
@@ -435,6 +584,304 @@ async def _enrich_04a_one(
     )
 
 
+# ─── Per-item substages 04b and 04c (title fuzzy match) ──────────────────
+
+
+async def _enrich_04b_one(
+    item: Item,
+    *,
+    staging_folder: Path,
+    zotero_client: ZoteroClient,
+    openalex_client: OpenAlexClient,
+    dry_run: bool,
+) -> tuple[EnrichRow, dict[str, Any] | None]:
+    """04b for a single item: title → OpenAlex search → fuzzy match → reparent."""
+    pdf_path = _pdf_for_text(item, staging_folder)
+    if not pdf_path.exists():
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="failed",
+                error=f"pdf_missing:{pdf_path}",
+            ),
+            None,
+        )
+
+    try:
+        title = extract_probable_title(pdf_path)
+    except Exception as exc:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="failed",
+                error=f"pdf_extract:{type(exc).__name__}:{exc}",
+            ),
+            None,
+        )
+
+    if title is None:
+        # Generic heading or pathological layout; falls to 04c later.
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="skipped_generic_title",
+                error=None,
+            ),
+            None,
+        )
+
+    try:
+        candidates = await openalex_client.search_works(title)
+    except Exception as exc:
+        log.warning("stage_04b.openalex_error", title=title, error=str(exc))
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="failed",
+                error=f"openalex_error:{type(exc).__name__}:{exc}",
+            ),
+            None,
+        )
+
+    picked = _pick_best_fuzzy_match(title, candidates, title_key="title")
+    if picked is None:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="no_progress",
+                error=None,
+            ),
+            None,
+        )
+    best, _score = picked
+
+    payload = map_openalex_to_zotero(best)
+    if payload is None:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="no_progress",
+                error="quality_gate_failed",
+            ),
+            None,
+        )
+
+    doi = _doi_from_openalex_work(best)
+    parent_key, error = await _create_parent_and_reparent(
+        item,
+        payload,
+        doi=doi,
+        zotero_client=zotero_client,
+        dry_run=dry_run,
+    )
+    if error is not None or parent_key is None:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=doi,
+                status="failed",
+                error=error,
+            ),
+            None,
+        )
+
+    status: EnrichStatus = "dry_run" if dry_run else "enriched_04b"
+    return (
+        EnrichRow(
+            sha256=item.id,
+            source_path=item.source_path,
+            zotero_item_key_before=item.zotero_item_key,
+            zotero_item_key_after=parent_key,
+            substage_resolved="04b",
+            new_doi=doi,
+            status=status,
+            error=None,
+        ),
+        payload,
+    )
+
+
+async def _enrich_04c_one(
+    item: Item,
+    *,
+    staging_folder: Path,
+    zotero_client: ZoteroClient,
+    semantic_scholar_client: SemanticScholarClient,
+    dry_run: bool,
+) -> tuple[EnrichRow, dict[str, Any] | None]:
+    """04c for a single item: title → Semantic Scholar search → fuzzy match → reparent."""
+    pdf_path = _pdf_for_text(item, staging_folder)
+    if not pdf_path.exists():
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="failed",
+                error=f"pdf_missing:{pdf_path}",
+            ),
+            None,
+        )
+
+    try:
+        title = extract_probable_title(pdf_path)
+    except Exception as exc:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="failed",
+                error=f"pdf_extract:{type(exc).__name__}:{exc}",
+            ),
+            None,
+        )
+
+    if title is None:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="skipped_generic_title",
+                error=None,
+            ),
+            None,
+        )
+
+    try:
+        candidates = await semantic_scholar_client.search_paper(title)
+    except Exception as exc:
+        log.warning("stage_04c.semantic_scholar_error", title=title, error=str(exc))
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="failed",
+                error=f"semantic_scholar_error:{type(exc).__name__}:{exc}",
+            ),
+            None,
+        )
+
+    picked = _pick_best_fuzzy_match(title, candidates, title_key="title")
+    if picked is None:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="no_progress",
+                error=None,
+            ),
+            None,
+        )
+    best, _score = picked
+
+    payload = map_semantic_scholar_to_zotero(best)
+    if payload is None:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="no_progress",
+                error="quality_gate_failed",
+            ),
+            None,
+        )
+
+    doi = _doi_from_ss_paper(best)
+    parent_key, error = await _create_parent_and_reparent(
+        item,
+        payload,
+        doi=doi,
+        zotero_client=zotero_client,
+        dry_run=dry_run,
+    )
+    if error is not None or parent_key is None:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=doi,
+                status="failed",
+                error=error,
+            ),
+            None,
+        )
+
+    status: EnrichStatus = "dry_run" if dry_run else "enriched_04c"
+    return (
+        EnrichRow(
+            sha256=item.id,
+            source_path=item.source_path,
+            zotero_item_key_before=item.zotero_item_key,
+            zotero_item_key_after=parent_key,
+            substage_resolved="04c",
+            new_doi=doi,
+            status=status,
+            error=None,
+        ),
+        payload,
+    )
+
+
 # ─── Eligible-items query ─────────────────────────────────────────────────
 
 
@@ -460,17 +907,20 @@ def run_enrich(
     engine: Engine | None = None,
     zotero_client: ZoteroClient | None = None,
     openalex_client: OpenAlexClient | None = None,
+    semantic_scholar_client: SemanticScholarClient | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: Callable[[], datetime] = _utc_now,
 ) -> EnrichResult:
     """Run one substage of the enrichment cascade.
 
-    Only ``substage="04a"`` is implemented in this PR. ``04b-04e`` raise
-    ``NotImplementedError`` until their follow-up PRs land.
+    ``04a`` (identifier extraction + OpenAlex DOI retry), ``04b`` (title
+    fuzzy match against OpenAlex), and ``04c`` (title fuzzy match against
+    Semantic Scholar) are wired. ``04d`` (LLM extraction) and ``04e``
+    (quarantine) raise ``NotImplementedError`` until PR 3/3 of issue #6.
     """
-    if substage != "04a":
+    if substage in ("04d", "04e"):
         raise NotImplementedError(
-            f"Substage {substage} not yet implemented; only '04a' is in this PR."
+            f"Substage {substage} not yet implemented — '04a', '04b', '04c' only."
         )
     return asyncio.run(
         _run_enrich_async(
@@ -480,6 +930,7 @@ def run_enrich(
             engine=engine,
             zotero_client=zotero_client,
             openalex_client=openalex_client,
+            semantic_scholar_client=semantic_scholar_client,
             sleep=sleep,
             now=now,
         )
@@ -494,10 +945,11 @@ async def _run_enrich_async(
     engine: Engine | None,
     zotero_client: ZoteroClient | None,
     openalex_client: OpenAlexClient | None,
+    semantic_scholar_client: SemanticScholarClient | None,
     sleep: Callable[[float], Awaitable[None]],
     now: Callable[[], datetime],
 ) -> EnrichResult:
-    _ = sleep  # reserved for future batch pacing; not needed for 04a alone
+    _ = sleep  # reserved for future batch pacing; not needed for the free substages
     settings = settings or Settings()
     if engine is None:
         engine = make_s1_engine(str(settings.paths.state_db))
@@ -515,6 +967,9 @@ async def _run_enrich_async(
     if openalex_client is None:
         email = settings.behavior.user_email or None
         openalex_client = OpenAlexClient(user_email=email)
+    if semantic_scholar_client is None:
+        ss_key = settings.semantic_scholar.api_key.get_secret_value() or None
+        semantic_scholar_client = SemanticScholarClient(api_key=ss_key)
 
     run = Run(stage=_STAGE, status="running", started_at=now())
     rows: list[EnrichRow] = []
@@ -533,20 +988,42 @@ async def _run_enrich_async(
             log.info("stage_04.eligible_items", count=len(items))
 
             for item in items:
-                row, mapped = await _enrich_04a_one(
-                    item,
-                    staging_folder=staging_folder,
-                    zotero_client=zotero_client,
-                    openalex_client=openalex_client,
-                    dry_run=dry_run,
-                )
+                if substage == "04a":
+                    row, mapped = await _enrich_04a_one(
+                        item,
+                        staging_folder=staging_folder,
+                        zotero_client=zotero_client,
+                        openalex_client=openalex_client,
+                        dry_run=dry_run,
+                    )
+                elif substage == "04b":
+                    row, mapped = await _enrich_04b_one(
+                        item,
+                        staging_folder=staging_folder,
+                        zotero_client=zotero_client,
+                        openalex_client=openalex_client,
+                        dry_run=dry_run,
+                    )
+                elif substage == "04c":
+                    row, mapped = await _enrich_04c_one(
+                        item,
+                        staging_folder=staging_folder,
+                        zotero_client=zotero_client,
+                        semantic_scholar_client=semantic_scholar_client,
+                        dry_run=dry_run,
+                    )
+                else:  # pragma: no cover — 04d/04e filtered upstream.
+                    raise NotImplementedError(
+                        f"Unreachable substage {substage} inside dispatcher."
+                    )
                 rows.append(row)
 
-                if row.status == "enriched_04a":
+                if row.status in _ENRICHED_STATUSES:
                     if not dry_run:
                         item.zotero_item_key = row.zotero_item_key_after
                         item.import_route = "A"
-                        item.detected_doi = row.new_doi
+                        if row.new_doi:
+                            item.detected_doi = row.new_doi
                         if mapped is not None:
                             item.metadata_json = json.dumps(mapped)
                         item.stage_completed = max(item.stage_completed, _STAGE)
@@ -555,8 +1032,8 @@ async def _run_enrich_async(
                     run.items_processed += 1
                 elif row.status == "dry_run":
                     pass
-                elif row.status == "no_progress":
-                    # No state change — item waits for 04b in the next PR.
+                elif row.status in ("no_progress", "skipped_generic_title"):
+                    # No state change — item waits for the next substage.
                     pass
                 elif row.status == "failed":
                     if not dry_run:
@@ -591,9 +1068,14 @@ async def _run_enrich_async(
         items_processed=items_processed,
         items_failed=items_failed,
         items_enriched_04a=sum(1 for r in rows if r.status == "enriched_04a"),
+        items_enriched_04b=sum(1 for r in rows if r.status == "enriched_04b"),
+        items_enriched_04c=sum(1 for r in rows if r.status == "enriched_04c"),
         items_no_progress=sum(1 for r in rows if r.status == "no_progress"),
         items_skipped=sum(
             1 for r in rows if r.status == "skipped_already_enriched"
+        ),
+        items_skipped_generic_title=sum(
+            1 for r in rows if r.status == "skipped_generic_title"
         ),
     )
     log.info(
@@ -601,7 +1083,10 @@ async def _run_enrich_async(
         processed=result.items_processed,
         failed=result.items_failed,
         enriched_04a=result.items_enriched_04a,
+        enriched_04b=result.items_enriched_04b,
+        enriched_04c=result.items_enriched_04c,
         no_progress=result.items_no_progress,
+        skipped_generic_title=result.items_skipped_generic_title,
         csv=str(csv_path),
     )
     return result
@@ -612,5 +1097,6 @@ __all__ = [
     "EnrichRow",
     "EnrichStatus",
     "EnrichSubstage",
+    "map_semantic_scholar_to_zotero",
     "run_enrich",
 ]
