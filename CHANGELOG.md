@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S1 integration — `run-all`, `status`, Alembic baseline** (#9, closes
+  Phase 8):
+  - **`zotai s1 run-all`** orchestrates Stages 01 → 06 in sequence,
+    pausing for a Y/n prompt between every pair of stages (skip with
+    `--yes`). `--tag-mode apply` (default) commits tags to Zotero;
+    `--tag-mode preview` stops `run-all` before Stage 06 so the
+    researcher can review `reports/tag_report_*.csv` first.
+    `--allow-template-taxonomy` is forwarded to Stage 05 for testing
+    runs against the shipped taxonomy template. `KeyboardInterrupt`
+    between stages is caught and reported as an orderly stop with
+    "next stage was N" so the user knows exactly where to resume.
+    `StageAbortedError` from any stage short-circuits and records the
+    reason in `RunAllResult.stopped_reason`. Totals (stages completed,
+    cost accumulated) are rendered via `format_summary`.
+  - **`zotai s1 status`** reads `state.db` and prints a plain-text
+    snapshot: items per `stage_completed` bucket (0..6 in fixed
+    order), quarantine / needs-review / `last_error` counters, cost
+    total + breakdown by stage from the `Run` table, last-run
+    timestamp + status, plus a credentials presence flag
+    (`openai=yes/no  zotero=yes/no`) — API keys never leak. Safe on
+    an empty DB: every counter reads 0 and the section shows
+    "state.db: &lt;path&gt; (not created yet)".
+  - **Alembic baseline migration** `20260420_initial_schema` creates
+    the three S1 tables (`item`, `run`, `apicall`) as the
+    pre-classifier schema; `20260422_classifier_columns` is now
+    `down_revision="20260420_initial_schema"` so `alembic upgrade head`
+    on a fresh DB reaches the same shape as `init_s1()`. Upgrade +
+    downgrade cycles verified end-to-end under test.
+  - **Zotero dry-run fix**: in the Stage 02 OCR path the client was
+    receiving `dry_run=False` even when the CLI flag was set; this PR
+    routes the root `--dry-run` through `run_all` uniformly. (No code
+    change in this PR outside the orchestrator — the existing stages
+    already honoured the flag; `run_all` just threads it.)
+  - New modules: `src/zotai/s1/status.py` (StatusSnapshot + renderer),
+    `src/zotai/s1/run_all.py` (orchestrator with inter-stage prompts),
+    `alembic/versions/20260420_initial_schema.py`. New CLI wiring on
+    `s1 run-all [--yes] [--tag-mode apply|preview]
+    [--allow-template-taxonomy]` and `s1 status`. New tests:
+    `tests/test_s1/test_status.py` (5), `tests/test_s1/test_run_all.py`
+    (9), `tests/test_s1/test_alembic_migrations.py` (3). Full suite:
+    **203 passed** (was 186). `mypy --strict` clean on modified files;
+    `ruff check` clean.
+
 - **S1 Stage 06 — validation report** (#8, closes the Stage 06 / Phase 7 issue):
   `zotai.s1.stage_06_validate.run_validate` aggregates the full S1 state
   and writes two files into `reports/`:

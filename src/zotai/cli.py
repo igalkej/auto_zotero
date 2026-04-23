@@ -461,17 +461,76 @@ def s1_validate(
 
 @s1_app.command("run-all")
 def s1_run_all(
-    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+    ctx: typer.Context,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            "-y",
+            help="Skip inter-stage confirmation prompts — run straight through.",
+        ),
+    ] = False,
+    tag_mode: Annotated[
+        str,
+        typer.Option(
+            "--tag-mode",
+            help=(
+                "How Stage 05 handles tags: 'apply' commits to Zotero "
+                "(default); 'preview' writes the CSV only and stops "
+                "run-all before Stage 06 so the researcher can review."
+            ),
+        ),
+    ] = "apply",
+    allow_template_taxonomy: Annotated[
+        bool,
+        typer.Option(
+            "--allow-template-taxonomy",
+            help=(
+                "Proceed even when config/taxonomy.yaml is marked "
+                "status=template — Stage 05's safety gate is relaxed "
+                "for deliberate testing runs. Never set on a real run."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Run stages 01-06 sequentially with inter-stage prompts."""
-    _ = yes
-    _not_implemented("s1 run-all", 8, 9)
+    from typing import cast
+
+    from zotai.config import Settings
+    from zotai.s1.run_all import TagMode, format_summary, run_all
+
+    if tag_mode not in ("apply", "preview"):
+        typer.secho(
+            f"Invalid --tag-mode '{tag_mode}'. Choose 'apply' or 'preview'.",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=2)
+
+    settings = Settings()
+    dry_run = bool(ctx.obj.get("dry_run", False)) or settings.behavior.dry_run
+
+    result = run_all(
+        yes=yes,
+        dry_run=dry_run,
+        tag_mode=cast(TagMode, tag_mode),
+        allow_template_taxonomy=allow_template_taxonomy,
+        settings=settings,
+    )
+    typer.echo(format_summary(result))
+    if not result.completed:
+        raise typer.Exit(code=1)
 
 
 @s1_app.command("status")
 def s1_status() -> None:
     """Print per-stage counts, costs, and errors from `state.db`."""
-    _not_implemented("s1 status", 8, 9)
+    from zotai.config import Settings
+    from zotai.s1.status import compute_status, format_status
+
+    settings = Settings()
+    snapshot = compute_status(settings=settings)
+    typer.echo(format_status(snapshot))
 
 
 # ─── S2 commands ──────────────────────────────────────────────────────────
