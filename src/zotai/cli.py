@@ -310,8 +310,52 @@ def s1_status() -> None:
 
 @s2_app.command("fetch-once")
 def s2_fetch_once() -> None:
-    """Run one RSS fetch cycle and persist new candidates."""
+    """Run one RSS fetch cycle and persist new candidates.
+
+    Step 0 of the cycle is the embedding-index reconcile (ADR 015), so
+    this command keeps the ChromaDB invariant in sync even when the
+    in-process scheduler is disabled (`S2_WORKER_DISABLED=true`).
+    """
     _not_implemented("s2 fetch-once", 11, 12)
+
+
+@s2_app.command("backfill-index")
+def s2_backfill_index(
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            "-y",
+            help="Skip the interactive confirmation prompt that shows the "
+            "estimated cost before embedding starts.",
+        ),
+    ] = False,
+) -> None:
+    """Embed every non-quarantined Zotero item into ChromaDB.
+
+    First-run command for S2 after S1 has populated the Zotero library.
+    Same reconcile_embeddings() code as the worker's step 0, but with
+    `max_per_cycle` lifted, a progress bar, and its own budget cap
+    (`S2_MAX_COST_USD_BACKFILL`, default $3.00). Idempotent — re-running
+    after a partial backfill resumes from where it left off.
+
+    Defined by ADR 015 §2; implementation lands in S2 Sprint 1 (#12).
+    """
+    _ = yes
+    _not_implemented("s2 backfill-index", 11, 12)
+
+
+@s2_app.command("reconcile")
+def s2_reconcile() -> None:
+    """Run a single reconcile_embeddings() cycle without RSS fetch.
+
+    Useful for: forcing the propagation of a recent push, debugging an
+    index/library divergence, or running from an external cron job that
+    drives reconciliation independently of the worker. Bounded by
+    `S2_MAX_EMBED_PER_CYCLE` and `S2_SAFE_DELETE_RATIO` defaults from
+    `.env` (same as the worker).
+    """
+    _not_implemented("s2 reconcile", 11, 12)
 
 
 @s2_app.command("dashboard")

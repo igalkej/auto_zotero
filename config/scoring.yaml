@@ -19,6 +19,12 @@ tag_scoring:
 
 semantic_scoring:
   top_k_corpus: 20
-  # Returned when ChromaDB is missing or empty, so the composite is still
-  # defined instead of silently dropping to 0 (see plan_02 §7.2).
+  # Returned when ChromaDB has fewer than min_corpus_size documents, so
+  # the composite stays defined instead of silently dropping to 0 (see
+  # plan_02 §7.2).
   neutral_fallback: 0.5
+  # Minimum docs in ChromaDB below which we fall back to neutral_fallback
+  # without attempting the k-NN query. Threshold-by-count (rather than
+  # "empty / not empty") covers small libraries where k-NN over a handful
+  # of papers would be uninformative noise. See ADR 015 §2.
+  min_corpus_size: 50

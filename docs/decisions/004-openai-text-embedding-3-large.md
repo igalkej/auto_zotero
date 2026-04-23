@@ -98,9 +98,10 @@ Concretely:
   similarity score. This is the normal story with embeddings — all
   models have this property — but worth naming.
 - **Token budget is per-paper, not per-query.** Very long papers
-  (books, theses) pay for their full text at fulltext-indexing time
-  (`zotero-mcp update-db --fulltext`). A 400-page book at ~150K tokens
-  is ~$0.02 — still cheap, but not free.
+  (books, theses) pay for their full text at indexing time (initial
+  `zotai s2 backfill-index` and any subsequent reconcile cycle that
+  picks them up under ADR 015). A 400-page book at ~150K tokens is
+  ~$0.02 — still cheap, but not free.
 
 ### Neutral
 
@@ -147,12 +148,14 @@ informedly. Power users can still override.
 ## References
 
 - `docs/plan_00_overview.md` §7 — stack canónico
-- `docs/plan_02_subsystem2.md` §7.3 — `score_semantic`
+- `docs/plan_02_subsystem2.md` §7.2 — `score_semantic`
 - `docs/plan_03_subsystem3.md` §4.1, §5.2 — embedder in `zotero-mcp`
-  setup
+  setup (S3 reads the index that S2 writes; ADR 015)
 - `docs/decisions/006-zotero-mcp-external-dependency.md` — the
   decision to adopt `zotero-mcp` as the upstream S3 server
-- `docs/decisions/011-chromadb-bind-mount.md` — how S2 sees the index
-  that S3 writes
+- `docs/decisions/011-chromadb-bind-mount.md` — bind-mount mechanism
+  (amended `:ro` → `:rw` by ADR 015)
+- `docs/decisions/015-s2-owns-embeddings-index.md` — who invokes the
+  embedder (S2, not `zotero-mcp update-db`)
 - `.env.example` — `OPENAI_EMBEDDING_MODEL=text-embedding-3-large`
 - `src/zotai/config.py` — `OpenAISettings.embedding_model`

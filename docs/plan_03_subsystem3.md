@@ -83,10 +83,12 @@ Permitir al investigador consultar su biblioteca Zotero desde Claude Desktop med
 
 ### 4.3 ChromaDB local
 
-- **Path en el host** (donde `zotero-mcp` escribe): `~/.config/zotero-mcp/chroma_db/` por default. Configurable en `.env` via `ZOTERO_MCP_CHROMA_HOST_PATH` — típicamente coincide con lo que `zotero-mcp setup` elige.
-- **Path en el container S2** (donde S2 lee): `/workspace/chroma_db`. Es siempre este valor, consistente con la convención `/workspace/*` del resto del container. `S2_CHROMA_PATH=/workspace/chroma_db` por default.
-- **El puente**: el servicio `dashboard` de `docker-compose.yml` monta el path del host en `/workspace/chroma_db:ro` (read-only para S2). Ver **ADR 011** (`docs/decisions/011-chromadb-bind-mount.md`) para el rationale completo.
-- **S2 lee, nunca escribe.** El mount es `:ro`, así que un bug que intente `chroma.add()` falla fuerte en vez de divergir silenciosamente del índice que mantiene `zotero-mcp`.
+Bajo **ADR 015**, S2 es el owner del índice y S3 (`zotero-mcp serve`) es lector puro. La inversión respecto al diseño original simplifica el mantenimiento (no hay que sincronizar dos paths, ni invocar `zotero-mcp update-db` cron / manual) y elimina la ventana de staleness silenciosa.
+
+- **Path en el host** (donde S3 lee): `~/.config/zotero-mcp/chroma_db/` por default. Configurable en `.env` via `ZOTERO_MCP_CHROMA_HOST_PATH` — el path debe coincidir con lo que `zotero-mcp setup` haya elegido al configurar Claude Desktop.
+- **Path en el container S2** (donde S2 escribe): `/workspace/chroma_db`. Es siempre este valor, consistente con la convención `/workspace/*` del resto del container. `S2_CHROMA_PATH=/workspace/chroma_db` por default.
+- **El puente**: el servicio `dashboard` de `docker-compose.yml` monta el path del host en `/workspace/chroma_db:rw`. Ver **ADR 011** (`docs/decisions/011-chromadb-bind-mount.md`) — mecanismo del bind mount, ahora amended para `:rw` por ADR 015.
+- **S2 escribe, S3 lee.** No se ejecuta `zotero-mcp update-db` en ningún flujo operativo del proyecto. La actualización del índice ocurre dentro de S2: backfill inicial via `zotai s2 backfill-index`, mantenimiento continuo via reconciliación por diff en cada ciclo del worker (paso 0, ver `plan_02` §4 / §9). Schema de lo que S2 escribe está documentado en ADR 015 §6 — contrato explícito para que `zotero-mcp serve` pueda leerlo de manera estable.
 
 ---
 
@@ -121,14 +123,16 @@ zotero-mcp setup
 #   - Embedding model: openai
 #   - OpenAI model: text-embedding-3-large
 #   - Provide OpenAI API key
+# IMPORTANTE: anotar el path de ChromaDB que setup elige y, si difiere
+# del default (~/.config/zotero-mcp/chroma_db), setear
+# ZOTERO_MCP_CHROMA_HOST_PATH en .env del container S2 para que
+# coincidan. ADR 011 explica por qué la coordinación es necesaria.
 
-# 4. Build del índice inicial
-zotero-mcp update-db --fulltext
-# Tarda ~30-60 min para 1500 papers.
-# Costo: ~$1-2 en embeddings.
-
-# 5. Verificar
+# 4. Verificar conectividad MCP (sin construir índice)
 zotero-mcp db-status
+# El índice se construye desde S2 con `zotai s2 backfill-index`,
+# NO con `zotero-mcp update-db`. Bajo ADR 015 update-db no se usa
+# en ningún flujo operativo del proyecto.
 ```
 
 ### 5.3 Configurar Claude Desktop
@@ -185,18 +189,20 @@ Claude usa `zotero_fulltext` para acceder al PDF via Zotero, lee, responde.
 
 ### 7.1 Re-indexación
 
-Cuando:
-- S2 agrega nuevos papers → el índice de ChromaDB se desincroniza.
-- Se cambia el modelo de embeddings.
-- Pasa >1 mes sin update.
+**Bajo ADR 015 esto es responsabilidad de S2, no del usuario ni de S3.** El reconcile corre automáticamente como paso 0 de cada ciclo del worker (default cada 6h via APScheduler — ver ADR 012). Si querés forzar un reconcile fuera de ciclo:
 
-Comando:
 ```bash
-zotero-mcp update-db          # incremental, solo nuevos
-zotero-mcp update-db --force-rebuild   # rebuild completo
+docker compose run --rm onboarding zotai s2 reconcile
 ```
 
-**Automatización**: cron job diario que corre `update-db`, configurado en `docs/s3-setup.md`. O manualmente tras cada sesión de triage en S2.
+Para inspeccionar el estado actual del índice (cuántos docs, último ciclo, pendientes, huérfanos), abrir el dashboard de S2 en `http://127.0.0.1:8000/metrics`.
+
+**Casos especiales:**
+- **Bibliografía recién migrada** (S1 corrió, ChromaDB vacía): el primer comando es `zotai s2 backfill-index` con `S2_MAX_COST_USD_BACKFILL` como cap. Tarda 30-60 min para ~1500 papers, cuesta $1-2.
+- **Cambio de modelo de embeddings**: vaciar ChromaDB manualmente (`rm -rf $ZOTERO_MCP_CHROMA_HOST_PATH`) y re-correr `backfill-index`. El cambio de modelo es muy infrecuente; no hay automatización para esto.
+- **Index corrupto o sospechoso**: el reconcile es auto-curativo — borra y re-embebe lo que detecte como divergente. No hay comando "rebuild" porque no hace falta.
+
+**No usar `zotero-mcp update-db`.** Bajo ADR 015 ese comando no es parte del flujo operativo del proyecto; usarlo manualmente puede generar un schema inconsistente con el que escribe S2 (ver ADR 015 §6 para el contrato).
 
 ### 7.2 Troubleshooting
 
@@ -209,25 +215,29 @@ Problemas comunes:
 
 ---
 
-## 8. Integración con S2 (shared ChromaDB)
+## 8. Integración con S2 (shared ChromaDB, S2 es owner)
 
-S2 usa el mismo ChromaDB que `zotero-mcp` para su criterio `score_semantic`. Detalles en ADR 011; resumen:
+Bajo **ADR 015**, la dirección de la integración se invierte respecto a versiones previas:
 
-- **Un solo store físico en disco**: el que `zotero-mcp` mantiene en `${ZOTERO_MCP_CHROMA_HOST_PATH:-$HOME/.config/zotero-mcp/chroma_db}`. No hay copia ni sync job.
-- **S2 lo ve via bind mount** en `/workspace/chroma_db` (read-only). El container nombra `S2_CHROMA_PATH=/workspace/chroma_db`; el host decide qué directorio "real" se monta ahí.
-- **Si ChromaDB vacía o desincronizada** (p.ej. el usuario nunca terminó el setup de S3): S2 degrada gracefully, `score_semantic=0.5` (neutral). El dashboard muestra un warning apuntando a `docs/s3-setup.md`.
+- **S2 es el owner del store**. Mantiene el invariante "todo item no-cuarentenado en Zotero está indexado" via `reconcile_embeddings()` en cada ciclo del worker. Schema documentado en ADR 015 §6.
+- **S3 (`zotero-mcp serve`) lee el mismo store** sobre el path host. No invoca `zotero-mcp update-db` en ningún flujo del proyecto.
+- **Un solo store físico en disco**: el que vive en `${ZOTERO_MCP_CHROMA_HOST_PATH:-$HOME/.config/zotero-mcp/chroma_db}` en el host. Sin copia, sin sync job. Bind-mounted al container de S2 como `/workspace/chroma_db:rw` (ver ADR 011 amended por ADR 015).
+- **Si ChromaDB tiene <`semantic_scoring.min_corpus_size` documentos**: S2 degrada gracefully, `score_semantic=neutral_fallback` (0.5). El dashboard muestra un warning apuntando a "ejecutá `zotai s2 backfill-index`".
+- **Compatibilidad de schema**: validada empíricamente (Fase 2 del plan de implementación de ADR 015). Cualquier upgrade de `zotero-mcp` debe re-validarse contra el script `scripts/validate_chromadb_schema.py`; el resultado se loguea en CHANGELOG.
 
 ---
 
 ## 9. Deliverables de la implementación de S3
 
-- [ ] `docs/s3-setup.md` con guía paso a paso por OS.
+- [ ] `docs/s3-setup.md` con guía paso a paso por OS — incluyendo coordinación de `ZOTERO_MCP_CHROMA_HOST_PATH` con la config de zotero-mcp (ADR 011 + ADR 015).
 - [ ] `docs/s3-usage.md` con prompts recomendados para cada modo.
-- [ ] `scripts/validate-s3.py` con queries de prueba automatizadas.
-- [ ] `docs/s3-troubleshooting.md` con problemas comunes.
-- [ ] `docs/decisions/006-zotero-mcp.md` ADR justificando no desarrollar custom.
-- [ ] Script helper `scripts/reindex-s3.sh` (y `.ps1`) para re-indexación fácil.
-- [ ] Verificación de que `S2_CHROMA_PATH` está documentado coherentemente entre S2 y S3 (cumplido por ADR 011 y los edits de §4.3 / §8).
+- [ ] `scripts/validate-s3.py` con queries de prueba automatizadas (recall@20, latencia).
+- [ ] `docs/s3-troubleshooting.md` con problemas comunes — incluyendo "MCP no encuentra docs tras upgrade de zotero-mcp" → re-correr `scripts/validate_chromadb_schema.py`.
+- [ ] ADR 006 (zotero-mcp como upstream MCP server) y ADR 009 (S1/S2 usan pyzotero, S3 usa MCP) **ya escritos en PR #36**, parcialmente superseded por ADR 015.
+
+**Removed deliverables (eran parte del diseño previo, ya no aplican bajo ADR 015):**
+- ~~Script helper `scripts/reindex-s3.sh` (y `.ps1`)~~. La re-indexación es responsabilidad de S2 (`zotai s2 reconcile` o el ciclo automático del worker), no del usuario via shell. Ver §7.1.
+- ~~Paso "Build del índice inicial" en §5.2~~. El backfill se dispara desde S2 con `zotai s2 backfill-index`.
 
 ---
 

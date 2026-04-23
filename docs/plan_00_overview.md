@@ -62,9 +62,9 @@ Objetivo de más alto nivel: **multiplicar por 3-5x la cantidad de consultas bib
 Razones:
 
 - S1 produce la biblioteca sobre la que opera todo lo demás. Bloqueante.
-- S3 es barato de implementar (~4h) y **cierra un ciclo de valor mínimo**: apenas terminado S1+S3, el usuario ya tiene producto funcional para descubrimiento y cita. Posponerlo al final deja al usuario con 3-4 semanas de biblioteca sin forma de consultar.
-- S3 funciona como **banco de validación para S2**: los mismos embeddings que expone S3 son los que usa S2 en su criterio de "similitud con corpus". Testear el scoring del S2 sin S3 operativo es a ciegas.
-- S2 es el más complejo (~2-3 semanas de desarrollo incremental). Construirlo sobre base ya validada reduce riesgo.
+- S3 en esta fase significa **setup del servidor MCP** para Claude Desktop: instalar `zotero-mcp`, configurar `claude_desktop_config.json`, y dejarlo corriendo. **No** se ejecuta `zotero-mcp update-db` — bajo ADR 015, S2 es el owner del índice de embeddings y `update-db` no se usa nunca en el flujo operativo. El backfill inicial de ChromaDB se dispara con `zotai s2 backfill-index` cuando S2 esté implementado.
+- S3 setup es barato (~4h) y **cierra un ciclo de valor mínimo**: con S1 + S3 + el primer `backfill-index` de S2, el usuario ya tiene producto funcional para descubrimiento y cita. Posponer S3 al final dejaría al usuario con semanas de biblioteca sin forma de consultar.
+- S2 es el más complejo (~2-3 semanas de desarrollo incremental). Bajo ADR 015 también absorbe la responsabilidad del indexador de embeddings (`src/zotai/s2/indexing.py`) que mantiene el invariante "todo item no-cuarentenado en Zotero está en ChromaDB" via reconciliación por diff en cada ciclo del worker.
 
 ---
 
@@ -82,7 +82,13 @@ Cada una con ADR correspondiente en `docs/decisions/`.
 | 006 | zotero-mcp (54yyyu) para S3 | Existe, estable, cubre los 3 modos out-of-the-box. Build propio no justificado. |
 | 007 | FastAPI + HTMX para dashboard S2 | HTMX evita SPA, renderizado server-side, más simple de mantener. Un único investigador hace cambios. |
 | 008 | Cuarentena en S1 en vez de "todo o nada" | Resuelve tensión completitud vs calidad. Lo dudoso queda accesible pero marcado. |
-| 009 | zotero-mcp usado por S3 **pero no por S1/S2** | S1/S2 usan la API de Zotero directa (pyzotero). MCP es para consumo conversacional. |
+| 009 | zotero-mcp usado por S3 **pero no por S1/S2** | S1/S2 usan la API de Zotero directa (pyzotero). MCP es para consumo conversacional. **Parcialmente superseded por ADR 015** en lo que hace al ChromaDB: S2 ahora también escribe directo al índice (sin pasar por `zotero-mcp update-db`), aunque sigue usando pyzotero para Zotero. |
+| 010 | Ruta A usa OpenAlex para DOI → metadata (no el translator de Zotero) | Translator de Zotero es API no pública / frágil entre versiones. OpenAlex cubre >98% DOIs académicos con API estable. |
+| 011 | ChromaDB compartida via bind mount Docker (no copia, no sync job) | Una sola path canónica `/workspace/chroma_db`, host-side configurable, mount `:rw` para que S2 escriba (amended por ADR 015 — originalmente `:ro`). |
+| 012 | APScheduler in-process default; cron / Task Scheduler como alternativa | Default que matchea el caso 80% (dashboard up); cron sirve a usuarios que cierran el dashboard a diario. Misma función `run_fetch_cycle()` desde ambos paths. |
+| 013 | Bridge networking + `host.docker.internal` en lugar de `network_mode: host` | `network_mode: host` no funciona en Docker Desktop Mac/Win; bridge + `extra_hosts: host-gateway` es uniforme cross-platform. |
+| 014 | Stage 03 dedup: skip attach si el item existente ya tiene PDF | Respeta estado curado del usuario; agrega valor cuando solo había metadata sin PDF. |
+| 015 | **S2 es owner del índice de embeddings; S3 es lector puro** | Invierte ADR 006/009 parcialmente. Elimina trigger externo (cron / on-use) y la ventana de staleness. S2 mantiene el invariante via reconciliación por diff en cada ciclo del worker. Ver ADR 015. |
 
 ---
 

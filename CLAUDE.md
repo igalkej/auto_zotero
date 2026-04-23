@@ -189,17 +189,23 @@ zotero-ai-toolkit/
 
 ## Contratos entre subsistemas
 
-Los tres subsistemas se comunican **solo a través de Zotero**. Zotero es la fuente de verdad única.
+Zotero es la fuente de verdad bibliográfica. ChromaDB es estado derivado vivo: S2 lo mantiene, S3 lo lee.
 
 ```
-S1 → Zotero ← S3 (read)
-            ↑
-S2 (write accepted items)
+S1 → Zotero ← S3 (read MCP)
+            ↑              ↑
+S2 (write accepted items)  │
+            │              │
+            └→ ChromaDB ←──┘
+               (S2 escribe; S3 lee)
 ```
 
-No hay DB compartida entre S1 y S2. No hay API interna entre subsistemas. Si necesitás que S2 "sepa algo" de S1, ese algo tiene que estar en Zotero (como tag, colección, o campo).
+**Reglas:**
+- No hay DB compartida entre S1 y S2 — `state.db` y `candidates.db` son disjuntas.
+- No hay API interna entre subsistemas. Si S2 necesita "saber algo" de S1, ese algo tiene que estar en Zotero (como tag, colección, o campo).
+- ChromaDB es la única excepción al "solo via Zotero": es estado derivado que S2 mantiene como índice secundario sobre Zotero. ADR 015 explica por qué S2 (no S3) es el owner. S3 lee ChromaDB para responder queries MCP; nunca escribe (`zotero-mcp update-db` no se usa en ningún flujo del proyecto).
 
-**Consecuencia**: S2 y S3 deben poder correr aunque S1 no haya corrido nunca. Degradan gracefully.
+**Consecuencia**: S2 y S3 deben poder correr aunque S1 no haya corrido nunca. Degradan gracefully (S2: `score_semantic=neutral_fallback`; S3: queries devuelven vacío hasta que `zotai s2 backfill-index` corra).
 
 ---
 
