@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **ADR 015 Fase 2 validation tooling**:
+  `scripts/validate_chromadb_schema.py` — standalone script that
+  populates a ChromaDB with the schema ADR 015 §6 prescribes (Zotero-
+  style 8-char IDs, real OpenAI `text-embedding-3-large` embeddings,
+  metadata `{title, year, item_type, doi, source, indexed_at,
+  source_subsystem}`). CLI flags: `--path`, `--collection-name`
+  (default `zotero_library`), `--num-items`, `--embedding-model`,
+  `--seed`. Requires `OPENAI_API_KEY` and the `s2` optional
+  dependencies (`chromadb>=0.5`). `docs/decisions/015-validation-checklist.md`
+  — user-side manual checklist for the five-step validation against
+  `zotero-mcp serve` + Claude Desktop that ADR 015 §5 requires before
+  Fase 3 code lands. Bloqueante para Fase 3.
+
 ### Changed
 
 - **Corpus LATAM reality check** (plan_01): §3 Etapa 03 and §3 Etapa 04
