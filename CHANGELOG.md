@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Docker finalization + setup docs + pipeline wrappers** (#10, closes
+  Phase 9):
+  - `scripts/run-pipeline.sh` (Linux / macOS, bash) and
+    `scripts/run-pipeline.ps1` (Windows, PowerShell) — thin wrappers
+    around `docker compose --profile onboarding run --rm onboarding
+    zotai s1 run-all`, forwarding any extra args verbatim. Fail-fast
+    if `.env` is missing with a clear pointer to `.env.example`.
+  - `docs/setup-linux.md` — per-OS guide: Docker Engine install,
+    Zotero local API, `.env` minimum, first run, `cron` recipe for
+    S2 worker (ADR 012), cross-references to ADR 013 for networking.
+  - `docs/setup-windows.md` — WSL2 + Docker Desktop + `host.docker.internal`
+    gotcha, PowerShell execution policy, Task Scheduler recipe for the
+    S2 worker alternative.
+  - `docs/troubleshooting.md` — seven categories: Docker, Zotero
+    connectivity, OCR, >20 MB PDFs (referencing the tracking issue
+    #39), budget exceeded mid-run, interrupted runs + resume, and
+    how to start any triage from `zotai s1 status` + `zotai s1
+    validate --open-report`.
+  - `docs/economics.md` — per-stage cost estimates (Jan 2026 OpenAI
+    prices), how the hard caps in `.env` enforce them, LATAM-heavy
+    corpus adjustments, optimization tips.
+  - `README.md` quickstart updated — commands match what Phase 8
+    actually exposes (`--profile onboarding`, `--rm`, `run-pipeline.*`
+    wrappers, `--tag-mode`, `--allow-template-taxonomy`). Status
+    table now reflects S1 as functional end-to-end.
+  - No Dockerfile / docker-compose.yml changes — both already finalised
+    by earlier PRs (#37 bridge networking, #42 ChromaDB :rw mount).
+    The compose file header and ADR cross-references remain accurate.
+  - No test file changes — full suite still at **203 passed**.
+
 - **S1 integration — `run-all`, `status`, Alembic baseline** (#9, closes
   Phase 8):
   - **`zotai s1 run-all`** orchestrates Stages 01 → 06 in sequence,
