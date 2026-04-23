@@ -51,6 +51,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - No Python runtime code modified — purely editorial + CLI stubs +
     one YAML key. Tests still pass (115). Code module + empirical
     validation come in subsequent PRs per the orden de trabajo.
+- **S2 composite score — ADR 016**: `score_composite` now defaults to
+  Reciprocal Rank Fusion (RRF, Cormack/Clarke/Büttcher 2009) instead
+  of the previous linear weighted mean. Fixes two problems with the
+  old default: (1) `w_t=1, w_s=w_q=2` were arbitrary pre-data
+  guesses; (2) the weighted mean buried papers with high score on one
+  criterion and low on the others — exactly the "out-of-distribution
+  but matches a persistent query" case S2 is supposed to surface.
+  Changes: `config/scoring.yaml` gains `composite_score.method: rrf`
+  (with `rrf_k: 60`); the legacy `weights:` block stays as opt-in
+  when `method=weighted_mean`. `plan_02` §7.4 rewritten with RRF
+  pseudocode + calibration-deferred note explaining why RRF today and
+  a logistic-regression calibration via a successor ADR once ≥100
+  triage decisions exist. Dashboard `/inbox` (Phase 12) also exposes
+  per-criterion sort so a "queries=#1" paper can be surfaced
+  independently. Docs + config only; runtime lands with Sprint 2
+  (#13).
 
 - **Architecture — ADR 015**: S2 becomes the owner of the ChromaDB
   embeddings index; S3 (`zotero-mcp serve`) is reduced to a pure
