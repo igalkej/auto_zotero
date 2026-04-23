@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **S1 Stage 03 dedup** (ADR 014): when Ruta A finds that a DOI is
+  already in the user's Zotero library, the stage now checks the
+  existing item for PDF attachments before adding ours.
+  - If the existing item already has a PDF child → skip attach,
+    `ImportRow.status = "deduped"`. Preserves the user's curated
+    state; avoids duplicated PDF children under one item.
+  - If the existing item has no PDF (metadata-only prior import) →
+    attach as before, `ImportRow.status = "deduped_pdf_added"`.
+  Both statuses count toward `items_deduped` and `items_route_a`; the
+  CSV surfaces which branch ran via the `status` column. HTML
+  snapshots and non-PDF attachments do not count as "has PDF". New
+  `ZoteroClient.children(item_key)` helper; three new tests
+  (`_attaches_when_existing_has_no_pdf`,
+  `_skips_attach_when_existing_has_pdf`,
+  `_skips_non_pdf_attachment`); `plan_01` §3 Etapa 03 Edge cases line
+  updated to reference the policy.
 - **Networking**: the `onboarding` and `dashboard` Compose services
   switch from `network_mode: host` to default bridge networking with
   `extra_hosts: - "host.docker.internal:host-gateway"` so the same

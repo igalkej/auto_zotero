@@ -41,13 +41,16 @@ class FakeZoteroClient:
         *,
         connectivity_ok: bool = True,
         existing: list[dict[str, Any]] | None = None,
+        existing_children: dict[str, list[dict[str, Any]]] | None = None,
     ) -> None:
         self.connectivity_ok = connectivity_ok
         self._existing = existing or []
+        self._existing_children = existing_children or {}
         self.dry_run = False
         self.created_items: list[dict[str, Any]] = []
         self.attachments: list[dict[str, Any]] = []
         self.items_calls: list[dict[str, Any]] = []
+        self.children_calls: list[str] = []
         self._next = 0
 
     def _key(self, prefix: str) -> str:
@@ -87,6 +90,10 @@ class FakeZoteroClient:
             {"paths": paths, "parent_key": parent_key, "key": key}
         )
         return {"success": {"0": key}, "unchanged": {}, "failed": {}}
+
+    def children(self, item_key: str, **kwargs: Any) -> list[dict[str, Any]]:
+        self.children_calls.append(item_key)
+        return self._existing_children.get(item_key, [])
 
 
 class FakeOpenAlexClient:
@@ -323,7 +330,8 @@ def test_route_a_falls_to_c_on_missing_title(tmp_path: Path) -> None:
     assert len(zot.created_items) == 0
 
 
-def test_route_a_dedupes_existing_doi(tmp_path: Path) -> None:
+def test_route_a_dedup_attaches_when_existing_has_no_pdf(tmp_path: Path) -> None:
+    """ADR 014: existing Zotero item with no PDF child → we attach ours."""
     settings = _settings(tmp_path)
     pdf = _write_pdf(tmp_path / "pdfs" / "p.pdf")
     doi = "10.1/already-in-zotero"
@@ -331,7 +339,9 @@ def test_route_a_dedupes_existing_doi(tmp_path: Path) -> None:
 
     existing_key = "EXISTING001"
     zot = FakeZoteroClient(
-        existing=[{"key": existing_key, "data": {"DOI": doi}}]
+        existing=[{"key": existing_key, "data": {"DOI": doi}}],
+        # No children at all → metadata-only prior import, we add the PDF.
+        existing_children={existing_key: []},
     )
     oa = FakeOpenAlexClient({doi: _good_openalex_work(doi)})
 
@@ -348,11 +358,104 @@ def test_route_a_dedupes_existing_doi(tmp_path: Path) -> None:
     assert len(zot.created_items) == 0, "dedup must skip create_items"
     assert len(zot.attachments) == 1
     assert zot.attachments[0]["parent_key"] == existing_key
+    assert zot.children_calls == [existing_key]
+    assert [r.status for r in result.rows] == ["deduped_pdf_added"]
 
     engine = make_s1_engine(str(settings.paths.state_db))
     with Session(engine) as session:
         item = session.exec(select(Item)).one()
     assert item.zotero_item_key == existing_key
+    assert item.stage_completed == 3
+
+
+def test_route_a_dedup_skips_attach_when_existing_has_pdf(tmp_path: Path) -> None:
+    """ADR 014: existing Zotero item with a PDF child → do not duplicate."""
+    settings = _settings(tmp_path)
+    pdf = _write_pdf(tmp_path / "pdfs" / "p.pdf")
+    doi = "10.1/already-in-zotero-with-pdf"
+    _seed(settings, sha="g" * 64, source_path=pdf, detected_doi=doi)
+
+    existing_key = "EXISTING002"
+    zot = FakeZoteroClient(
+        existing=[{"key": existing_key, "data": {"DOI": doi}}],
+        existing_children={
+            existing_key: [
+                {
+                    "key": "PRE_PDF_001",
+                    "data": {
+                        "itemType": "attachment",
+                        "contentType": "application/pdf",
+                    },
+                }
+            ]
+        },
+    )
+    oa = FakeOpenAlexClient({doi: _good_openalex_work(doi)})
+
+    result = run_import(
+        batch_pause_seconds=0,
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        openalex_client=oa,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_deduped == 1
+    assert result.items_route_a == 1
+    assert len(zot.attachments) == 0, (
+        "existing PDF child must prevent a duplicate attach"
+    )
+    assert zot.children_calls == [existing_key]
+    assert [r.status for r in result.rows] == ["deduped"]
+
+    engine = make_s1_engine(str(settings.paths.state_db))
+    with Session(engine) as session:
+        item = session.exec(select(Item)).one()
+    assert item.zotero_item_key == existing_key
+    assert item.stage_completed == 3
+
+
+def test_route_a_dedup_skips_non_pdf_attachment(tmp_path: Path) -> None:
+    """An HTML snapshot on the existing item does not count as a PDF."""
+    settings = _settings(tmp_path)
+    pdf = _write_pdf(tmp_path / "pdfs" / "p.pdf")
+    doi = "10.1/has-snapshot-but-no-pdf"
+    _seed(settings, sha="h" * 64, source_path=pdf, detected_doi=doi)
+
+    existing_key = "EXISTING003"
+    zot = FakeZoteroClient(
+        existing=[{"key": existing_key, "data": {"DOI": doi}}],
+        existing_children={
+            existing_key: [
+                {
+                    "key": "SNAPSHOT_001",
+                    "data": {
+                        "itemType": "attachment",
+                        "contentType": "text/html",
+                    },
+                },
+                {
+                    "key": "NOTE_001",
+                    "data": {
+                        "itemType": "note",
+                    },
+                },
+            ]
+        },
+    )
+    oa = FakeOpenAlexClient({doi: _good_openalex_work(doi)})
+
+    result = run_import(
+        batch_pause_seconds=0,
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        openalex_client=oa,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    # HTML snapshot ≠ PDF — we still attach our PDF.
+    assert len(zot.attachments) == 1
+    assert [r.status for r in result.rows] == ["deduped_pdf_added"]
 
 
 # ── Route C: no DOI ────────────────────────────────────────────────────────
