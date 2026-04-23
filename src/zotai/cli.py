@@ -338,14 +338,85 @@ def s1_enrich(
 
 @s1_app.command("tag")
 def s1_tag(
-    preview: Annotated[bool, typer.Option("--preview")] = False,
-    apply: Annotated[bool, typer.Option("--apply")] = False,
-    re_tag: Annotated[bool, typer.Option("--re-tag")] = False,
-    max_cost: Annotated[float | None, typer.Option("--max-cost")] = None,
+    ctx: typer.Context,
+    preview: Annotated[
+        bool,
+        typer.Option(
+            "--preview",
+            help="Write tag proposals to reports/tag_report_<ts>.csv without touching Zotero.",
+        ),
+    ] = False,
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Apply the tags to Zotero and advance stage_completed to 5.",
+        ),
+    ] = False,
+    re_tag: Annotated[
+        bool,
+        typer.Option(
+            "--re-tag",
+            help="Re-tag items that already have tags (default skips them).",
+        ),
+    ] = False,
+    max_cost: Annotated[
+        float | None,
+        typer.Option(
+            "--max-cost",
+            help="Override MAX_COST_USD_STAGE_05 for this invocation.",
+        ),
+    ] = None,
+    allow_template_taxonomy: Annotated[
+        bool,
+        typer.Option(
+            "--allow-template-taxonomy",
+            help=(
+                "Proceed even when config/taxonomy.yaml is marked "
+                "status=template. Useful for integration tests on the "
+                "default taxonomy before the researcher customizes it; "
+                "do NOT set on a real run."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Stage 05 — LLM tagging against the TEMA/METODO taxonomy."""
-    _ = preview, apply, re_tag, max_cost
-    _not_implemented("s1 tag", 6, 7)
+    from zotai.config import Settings
+    from zotai.s1.handler import StageAbortedError
+    from zotai.s1.stage_05_tag import run_tag
+
+    settings = Settings()
+    dry_run = bool(ctx.obj.get("dry_run", False)) or settings.behavior.dry_run
+
+    if preview == apply:
+        typer.secho(
+            "Pass exactly one of --preview or --apply.",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=2)
+
+    try:
+        result = run_tag(
+            preview=preview,
+            apply=apply,
+            re_tag=re_tag,
+            dry_run=dry_run,
+            max_cost=max_cost,
+            allow_template_taxonomy=allow_template_taxonomy,
+            settings=settings,
+        )
+    except StageAbortedError as exc:
+        typer.secho(f"Stage aborted: {exc}", err=True, fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(
+        f"processed={result.items_processed} failed={result.items_failed} "
+        f"tagged={result.items_tagged} previewed={result.items_previewed} "
+        f"no_metadata={result.items_no_metadata} "
+        f"llm_failed={result.items_llm_failed} "
+        f"cost=${result.cost_usd:.4f} csv={result.csv_path}"
+    )
 
 
 @s1_app.command("validate")
