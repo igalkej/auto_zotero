@@ -1,34 +1,44 @@
-"""Tests for :mod:`zotai.s1.stage_04_enrich` — substages 04a, 04b, 04c.
+"""Tests for :mod:`zotai.s1.stage_04_enrich` — substages 04a-04e + cascade.
 
 Structure mirrors ``test_stage_03.py``: a fake ``ZoteroClient`` records
-every call; fake ``OpenAlexClient`` / ``SemanticScholarClient`` return
-scripted responses. Tests drive :func:`run_enrich` (sync wrapper) with
-the substage under test.
+every call; fake ``OpenAlexClient`` / ``SemanticScholarClient`` /
+``OpenAIClient`` return scripted responses. Tests drive :func:`run_enrich`
+(sync wrapper) with the substage under test.
 
 Covered substages:
 
 - **04a** — identifier regex + OpenAlex DOI retry (from PR 1/3).
 - **04b** — OpenAlex fuzzy title match (PR 2/3).
 - **04c** — Semantic Scholar fuzzy title match (PR 2/3).
+- **04d** — LLM JSON extraction via ``gpt-4o-mini`` (PR 3/3).
+- **04e** — Quarantine: tag + collection + separate report CSV (PR 3/3).
+- **all** — Per-item cascade through every substage with budget awareness (PR 3/3).
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from sqlmodel import Session, select
 
+from zotai.api.openai_client import BudgetExceededError
 from zotai.config import PathSettings, Settings, ZoteroSettings
-from zotai.s1.stage_04_enrich import map_semantic_scholar_to_zotero, run_enrich
+from zotai.s1.stage_04_enrich import (
+    LLMExtractedMetadata,
+    map_llm_extraction_to_zotero,
+    map_semantic_scholar_to_zotero,
+    run_enrich,
+)
 from zotai.state import Item, init_s1, make_s1_engine
 
 # ─── Fakes ─────────────────────────────────────────────────────────────────
 
 
 class FakeZoteroClient:
-    """Minimal in-memory stand-in for ``ZoteroClient``. Covers the 04a surface."""
+    """Minimal in-memory stand-in for ``ZoteroClient``. Covers 04a-04e surface."""
 
     def __init__(
         self,
@@ -36,16 +46,21 @@ class FakeZoteroClient:
         existing: list[dict[str, Any]] | None = None,
         existing_children: dict[str, list[dict[str, Any]]] | None = None,
         orphans: dict[str, dict[str, Any]] | None = None,
+        existing_collections: list[dict[str, Any]] | None = None,
     ) -> None:
         self._existing = existing or []
         self._existing_children = existing_children or {}
         self._orphans = orphans or {}
+        self._collections: list[dict[str, Any]] = list(existing_collections or [])
         self.dry_run = False
         self.created_items: list[dict[str, Any]] = []
         self.items_calls: list[dict[str, Any]] = []
         self.children_calls: list[str] = []
         self.item_fetch_calls: list[str] = []
         self.updated_items: list[dict[str, Any]] = []
+        self.created_collections: list[dict[str, Any]] = []
+        self.addto_collection_calls: list[tuple[str, str]] = []
+        self.add_tags_calls: list[tuple[str, list[str]]] = []
         self._next = 0
 
     def _key(self, prefix: str) -> str:
@@ -71,7 +86,8 @@ class FakeZoteroClient:
     def item(self, item_key: str) -> dict[str, Any]:
         self.item_fetch_calls.append(item_key)
         if item_key in self._orphans:
-            return {"data": self._orphans[item_key]}
+            # pyzotero's shape: top-level ``key`` mirrored inside ``data``.
+            return {"key": item_key, "data": self._orphans[item_key]}
         return {"data": {}}
 
     def create_items(self, payloads: list[dict[str, Any]]) -> dict[str, Any]:
@@ -84,6 +100,33 @@ class FakeZoteroClient:
 
     def update_item(self, item: dict[str, Any]) -> bool:
         self.updated_items.append(item)
+        return True
+
+    def collections(self, **kwargs: Any) -> list[dict[str, Any]]:
+        return list(self._collections)
+
+    def create_collections(
+        self, payload: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        success: dict[str, str] = {}
+        for idx, entry in enumerate(payload):
+            key = self._key("COLL")
+            created = {"key": key, "data": {"key": key, "name": entry["name"]}}
+            self._collections.append(created)
+            self.created_collections.append(created)
+            success[str(idx)] = key
+        return {"success": success, "unchanged": {}, "failed": {}}
+
+    def addto_collection(
+        self, collection_key: str, item: dict[str, Any]
+    ) -> bool:
+        item_key = item.get("key") or ""
+        self.addto_collection_calls.append((collection_key, item_key))
+        return True
+
+    def add_tags(self, item: dict[str, Any], tags: list[str]) -> bool:
+        item_key = item.get("key") or ""
+        self.add_tags_calls.append((item_key, list(tags)))
         return True
 
 
@@ -108,6 +151,60 @@ class FakeOpenAlexClient:
     ) -> list[dict[str, Any]]:
         self.search_calls.append((title, per_page))
         return self._search_responses.get(title, [])
+
+
+class FakeOpenAIClient:
+    """Mimics ``OpenAIClient.extract_metadata`` — returns queued responses.
+
+    Each queued entry is either a JSON-string body (wrapped into a minimal
+    response object on demand), a ``BudgetExceededError`` instance (raised),
+    or an arbitrary exception (raised) so tests can exercise retry + error
+    paths.
+    """
+
+    def __init__(self, queue: list[str | Exception] | None = None) -> None:
+        self._queue: list[str | Exception] = list(queue or [])
+        self.extract_calls: list[str] = []
+
+    async def extract_metadata(
+        self, *, text: str, model: str = "gpt-4o-mini"
+    ) -> Any:
+        self.extract_calls.append(text)
+        if not self._queue:
+            raise AssertionError("extract_metadata called more times than queued")
+        nxt = self._queue.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return _fake_usage_record(nxt, model=model)
+
+
+def _fake_usage_record(content: str, *, model: str) -> Any:
+    """Build an object that duck-types what ``_parse_llm_response`` reads."""
+
+    class _Message:
+        def __init__(self, c: str) -> None:
+            self.content = c
+
+    class _Choice:
+        def __init__(self, c: str) -> None:
+            self.message = _Message(c)
+
+    class _Response:
+        def __init__(self, c: str) -> None:
+            self.choices = [_Choice(c)]
+            self.usage = type(
+                "U", (), {"prompt_tokens": 100, "completion_tokens": 50}
+            )()
+
+    class _Usage:
+        def __init__(self, resp: Any) -> None:
+            self.response = resp
+            self.model = model
+            self.prompt_tokens = 100
+            self.completion_tokens = 50
+            self.cost_usd = 0.0
+
+    return _Usage(_Response(content))
 
 
 class FakeSemanticScholarClient:
@@ -1006,24 +1103,575 @@ def test_map_ss_builds_payload_minimal() -> None:
     assert len(payload["creators"]) == 2
 
 
-# ─── Substage not yet implemented: 04d raises (04e also blocked) ─────────
+# ─── 04d: happy path — JSON extraction → Zotero parent ──────────────────
 
 
-def test_04d_not_implemented_raises(tmp_path: Path) -> None:
+def _llm_json(
+    *,
+    title: str = "A discovered paper",
+    year: int = 2024,
+    item_type: str = "journalArticle",
+    doi: str | None = "10.1000/llm-found",
+    venue: str = "Journal of LLMs",
+    abstract: str = "Abstract discovered by the LLM.",
+    authors: list[dict[str, str]] | None = None,
+) -> str:
+    """Helper: valid JSON body the LLM is expected to emit for 04d."""
+    body: dict[str, Any] = {
+        "title": title,
+        "authors": authors
+        if authors is not None
+        else [
+            {"first": "Jane", "last": "Doe"},
+            {"first": "John", "last": "Smith"},
+        ],
+        "year": year,
+        "item_type": item_type,
+        "venue": venue,
+        "abstract": abstract,
+    }
+    if doi is not None:
+        body["doi"] = doi
+    return json.dumps(body)
+
+
+def test_04d_extracts_and_creates_parent(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
     settings = _settings(tmp_path)
+    pdf = _write_pdf(tmp_path / "pdfs" / "d1.pdf")
+    orphan_key = "ORPHAN30"
+    _seed_orphan(
+        settings,
+        sha="A" * 64,
+        source_path=pdf,
+        detected_doi=None,
+        zotero_item_key=orphan_key,
+    )
+    _patch_extract_text_pages(
+        monkeypatch,
+        {pdf.name: ["Page 1 text about something", "Page 2 continues"]},
+    )
+
+    zot = FakeZoteroClient(
+        orphans={orphan_key: {"key": orphan_key, "itemType": "attachment"}}
+    )
+    oa_client = FakeOpenAIClient(queue=[_llm_json()])
+
+    result = run_enrich(
+        substage="04d",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        openai_client=oa_client,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_enriched_04d == 1
+    assert len(zot.created_items) == 1
+    payload = zot.created_items[0]["payload"]
+    assert payload["title"] == "A discovered paper"
+    assert payload["DOI"] == "10.1000/llm-found"
+    assert payload["itemType"] == "journalArticle"
+    assert len(zot.updated_items) == 1
+    assert zot.updated_items[0]["parentItem"] == zot.created_items[0]["key"]
+
+    engine = make_s1_engine(str(settings.paths.state_db))
+    with Session(engine) as session:
+        item = session.exec(select(Item)).one()
+    assert item.stage_completed == 4
+    assert item.import_route == "A"
+    assert item.detected_doi == "10.1000/llm-found"
+
+
+# ─── 04d: malformed JSON → retry once → succeed on second attempt ────────
+
+
+def test_04d_retries_once_on_malformed_json(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path)
+    pdf = _write_pdf(tmp_path / "pdfs" / "d2.pdf")
+    _seed_orphan(
+        settings,
+        sha="B" * 64,
+        source_path=pdf,
+        zotero_item_key="ORPHAN31",
+    )
+    _patch_extract_text_pages(monkeypatch, {pdf.name: ["Paper text", ""]})
+
+    zot = FakeZoteroClient(orphans={"ORPHAN31": {"key": "ORPHAN31"}})
+    # First response is malformed; second is valid.
+    oa_client = FakeOpenAIClient(queue=["not json at all {{{", _llm_json()])
+
+    result = run_enrich(
+        substage="04d",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        openai_client=oa_client,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_enriched_04d == 1
+    assert len(oa_client.extract_calls) == 2, "Second attempt should have fired"
+
+
+# ─── 04d: both attempts invalid → no_progress ────────────────────────────
+
+
+def test_04d_exhausts_retries_no_progress(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path)
+    pdf = _write_pdf(tmp_path / "pdfs" / "d3.pdf")
+    _seed_orphan(
+        settings,
+        sha="C" * 64,
+        source_path=pdf,
+        zotero_item_key="ORPHAN32",
+    )
+    _patch_extract_text_pages(monkeypatch, {pdf.name: ["text", ""]})
+
+    zot = FakeZoteroClient()
+    oa_client = FakeOpenAIClient(queue=["garbage", "still garbage"])
+
+    result = run_enrich(
+        substage="04d",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        openai_client=oa_client,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_no_progress == 1
+    assert result.items_enriched_04d == 0
+    assert [r.error for r in result.rows] == ["llm_json_invalid"]
+    assert len(zot.created_items) == 0
+
+
+# ─── 04d: budget exceeded → row records budget_exceeded status ───────────
+
+
+def test_04d_budget_exceeded_marks_status(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path)
+    pdf = _write_pdf(tmp_path / "pdfs" / "d4.pdf")
+    _seed_orphan(
+        settings,
+        sha="D" * 64,
+        source_path=pdf,
+        zotero_item_key="ORPHAN33",
+    )
+    _patch_extract_text_pages(monkeypatch, {pdf.name: ["text", ""]})
+
+    zot = FakeZoteroClient()
+    oa_client = FakeOpenAIClient(
+        queue=[BudgetExceededError("spent=$2.5, budget=$2.0")]
+    )
+
+    result = run_enrich(
+        substage="04d",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        openai_client=oa_client,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert [r.status for r in result.rows] == ["budget_exceeded"]
+    assert result.items_enriched_04d == 0
+    # Item is not marked as failed — budget exhaustion is recoverable on
+    # the next run with a higher cap.
+    assert result.items_failed == 0
+
+
+# ─── 04d: quality gate (bad item_type) → no_progress ─────────────────────
+
+
+def test_04d_invalid_item_type_is_no_progress(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path)
+    pdf = _write_pdf(tmp_path / "pdfs" / "d5.pdf")
+    _seed_orphan(
+        settings,
+        sha="E" * 64,
+        source_path=pdf,
+        zotero_item_key="ORPHAN34",
+    )
+    _patch_extract_text_pages(monkeypatch, {pdf.name: ["text", ""]})
+
+    zot = FakeZoteroClient()
+    oa_client = FakeOpenAIClient(
+        queue=[_llm_json(item_type="tweet")]  # not in the allow-list
+    )
+
+    result = run_enrich(
+        substage="04d",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        openai_client=oa_client,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_no_progress == 1
+    assert [r.error for r in result.rows] == ["quality_gate_failed"]
+
+
+# ─── 04e: happy path — quarantine creates collection, tags, writes CSV ──
+
+
+def test_04e_quarantines_and_writes_report(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path)
+    pdf = _write_pdf(tmp_path / "pdfs" / "e1.pdf")
+    orphan_key = "ORPHAN40"
+    _seed_orphan(
+        settings,
+        sha="F" * 64,
+        source_path=pdf,
+        zotero_item_key=orphan_key,
+    )
+    # Give 04e something to put into the text_snippet column.
+    _patch_extract_text_pages(
+        monkeypatch,
+        {pdf.name: ["Some first page text that should appear in the snippet.", ""]},
+    )
+
+    zot = FakeZoteroClient(
+        orphans={orphan_key: {"key": orphan_key, "itemType": "attachment"}}
+    )
+
+    result = run_enrich(
+        substage="04e",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_quarantined == 1
+    # Collection was created on-demand (no pre-existing Quarantine).
+    assert len(zot.created_collections) == 1
+    assert zot.created_collections[0]["data"]["name"] == "Quarantine"
+    # Item was tagged + added to the collection.
+    assert zot.add_tags_calls == [(orphan_key, ["needs-manual-review"])]
+    assert zot.addto_collection_calls == [
+        (zot.created_collections[0]["key"], orphan_key)
+    ]
+    # quarantine_report.csv was written with the snippet.
+    assert result.quarantine_csv_path is not None
+    assert result.quarantine_csv_path.exists()
+    content = result.quarantine_csv_path.read_text(encoding="utf-8")
+    assert "Some first page text" in content
+
+    engine = make_s1_engine(str(settings.paths.state_db))
+    with Session(engine) as session:
+        item = session.exec(select(Item)).one()
+    assert item.in_quarantine is True
+    assert item.stage_completed == 4
+
+
+# ─── 04e: reuses an already-existing Quarantine collection ───────────────
+
+
+def test_04e_reuses_existing_quarantine_collection(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path)
+    pdf = _write_pdf(tmp_path / "pdfs" / "e2.pdf")
+    _seed_orphan(
+        settings,
+        sha="G" * 64,
+        source_path=pdf,
+        zotero_item_key="ORPHAN41",
+    )
+    _patch_extract_text_pages(monkeypatch, {pdf.name: ["txt", ""]})
+
+    zot = FakeZoteroClient(
+        orphans={"ORPHAN41": {"key": "ORPHAN41"}},
+        existing_collections=[
+            {"key": "PREEXISTING_Q", "data": {"key": "PREEXISTING_Q", "name": "Quarantine"}}
+        ],
+    )
+
+    result = run_enrich(
+        substage="04e",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_quarantined == 1
+    assert len(zot.created_collections) == 0, "Should not re-create Quarantine"
+    assert zot.addto_collection_calls == [("PREEXISTING_Q", "ORPHAN41")]
+
+
+# ─── Cascade 'all': 04a hits → never calls 04b/04c/04d ───────────────────
+
+
+def test_cascade_all_stops_at_first_success(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path)
+    pdf = _write_pdf(tmp_path / "pdfs" / "all1.pdf")
+    orphan_key = "ORPHAN50"
+    new_doi = "10.1000/cascade-hit-04a"
+    _seed_orphan(
+        settings,
+        sha="H" * 64,
+        source_path=pdf,
+        detected_doi=None,
+        zotero_item_key=orphan_key,
+    )
+    _patch_extract_text_pages(
+        monkeypatch, {pdf.name: [f"DOI {new_doi}", "", ""]}
+    )
+
+    zot = FakeZoteroClient(orphans={orphan_key: {"key": orphan_key}})
+    oa = FakeOpenAlexClient({new_doi: _good_openalex_work(new_doi)})
+    ss = FakeSemanticScholarClient()
+    llm = FakeOpenAIClient()  # no queue — would raise if called
+
+    result = run_enrich(
+        substage="all",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        openalex_client=oa,  # type: ignore[arg-type]
+        semantic_scholar_client=ss,  # type: ignore[arg-type]
+        openai_client=llm,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_enriched_04a == 1
+    assert result.items_enriched_04b == 0
+    assert result.items_enriched_04c == 0
+    assert result.items_enriched_04d == 0
+    assert result.items_quarantined == 0
+    assert ss.search_calls == [], "Semantic Scholar must not be called"
+    assert llm.extract_calls == [], "LLM must not be called when 04a succeeded"
+
+
+# ─── Cascade 'all': all free substages miss → 04d picks it up ────────────
+
+
+def test_cascade_all_falls_through_to_04d(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path)
+    pdf = _write_pdf(tmp_path / "pdfs" / "all2.pdf")
+    orphan_key = "ORPHAN51"
+    title = "A recalcitrant paper title"
+    _seed_orphan(
+        settings,
+        sha="I" * 64,
+        source_path=pdf,
+        detected_doi=None,
+        zotero_item_key=orphan_key,
+    )
+    # No identifiers in the text → 04a misses.
+    _patch_extract_text_pages(
+        monkeypatch, {pdf.name: ["Body without ids", "More body", ""]}
+    )
+    # 04b/04c both use extract_probable_title and get no fuzzy match.
+    _patch_extract_probable_title(monkeypatch, {pdf.name: title})
+
+    zot = FakeZoteroClient(orphans={orphan_key: {"key": orphan_key}})
+    # Neither OpenAlex search nor Semantic Scholar return a fuzzy-match-able title.
+    oa = FakeOpenAlexClient(
+        search_responses={
+            title: [_good_openalex_work("10.1000/x", title="Totally different")]
+        }
+    )
+    ss = FakeSemanticScholarClient(
+        search_responses={title: [_ss_paper("Unrelated")]}
+    )
+    llm = FakeOpenAIClient(queue=[_llm_json(title=title, doi="10.1000/llm-saved")])
+
+    result = run_enrich(
+        substage="all",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        openalex_client=oa,  # type: ignore[arg-type]
+        semantic_scholar_client=ss,  # type: ignore[arg-type]
+        openai_client=llm,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_enriched_04d == 1
+    assert result.items_quarantined == 0
+    assert ss.search_calls == [(title, 5, "title,authors,year,venue,abstract,externalIds")]
+
+
+# ─── Cascade 'all': everything fails → 04e quarantines ───────────────────
+
+
+def test_cascade_all_quarantines_on_exhaustion(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path)
+    pdf = _write_pdf(tmp_path / "pdfs" / "all3.pdf")
+    orphan_key = "ORPHAN52"
+    title = "Another hopeless paper"
+    _seed_orphan(
+        settings,
+        sha="J" * 64,
+        source_path=pdf,
+        detected_doi=None,
+        zotero_item_key=orphan_key,
+    )
+    _patch_extract_text_pages(
+        monkeypatch, {pdf.name: ["No ids at all", "Nothing", ""]}
+    )
+    _patch_extract_probable_title(monkeypatch, {pdf.name: title})
+
+    zot = FakeZoteroClient(orphans={orphan_key: {"key": orphan_key}})
+    oa = FakeOpenAlexClient(search_responses={title: []})
+    ss = FakeSemanticScholarClient(search_responses={title: []})
+    # LLM emits a payload the quality gate rejects → falls through to 04e.
+    llm = FakeOpenAIClient(
+        queue=["garbage", "still garbage"]  # retry exhausts
+    )
+
+    result = run_enrich(
+        substage="all",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        openalex_client=oa,  # type: ignore[arg-type]
+        semantic_scholar_client=ss,  # type: ignore[arg-type]
+        openai_client=llm,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_quarantined == 1
+    assert result.items_enriched_04a == 0
+    assert result.items_enriched_04d == 0
+    assert result.quarantine_csv_path is not None
+    engine = make_s1_engine(str(settings.paths.state_db))
+    with Session(engine) as session:
+        item = session.exec(select(Item)).one()
+    assert item.in_quarantine is True
+
+
+# ─── Cascade 'all': budget exceeded on first item routes rest to 04e ─────
+
+
+def test_cascade_all_budget_tripped_skips_llm_for_rest(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path)
+    # Two items that both need to reach 04d.
+    pdf1 = _write_pdf(tmp_path / "pdfs" / "b1.pdf")
+    pdf2 = _write_pdf(tmp_path / "pdfs" / "b2.pdf")
+    _seed_orphan(settings, sha="K" * 64, source_path=pdf1, zotero_item_key="ORPH_B1")
+    _seed_orphan(settings, sha="L" * 64, source_path=pdf2, zotero_item_key="ORPH_B2")
+    _patch_extract_text_pages(
+        monkeypatch, {pdf1.name: ["p1"], pdf2.name: ["p2"]}
+    )
+    _patch_extract_probable_title(
+        monkeypatch, {pdf1.name: "Title one", pdf2.name: "Title two"}
+    )
+
+    zot = FakeZoteroClient(
+        orphans={
+            "ORPH_B1": {"key": "ORPH_B1"},
+            "ORPH_B2": {"key": "ORPH_B2"},
+        }
+    )
+    oa = FakeOpenAlexClient(
+        search_responses={"Title one": [], "Title two": []}
+    )
+    ss = FakeSemanticScholarClient(
+        search_responses={"Title one": [], "Title two": []}
+    )
+    # Budget trips on the first call; the second item must route to 04e
+    # without any LLM call.
+    llm = FakeOpenAIClient(
+        queue=[BudgetExceededError("over budget")]
+    )
+
+    result = run_enrich(
+        substage="all",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        openalex_client=oa,  # type: ignore[arg-type]
+        semantic_scholar_client=ss,  # type: ignore[arg-type]
+        openai_client=llm,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_quarantined == 2
+    assert len(llm.extract_calls) == 1, "Second item must skip the LLM"
+
+
+# ─── map_llm_extraction_to_zotero direct checks ─────────────────────────
+
+
+def test_map_llm_requires_title_and_authors() -> None:
+    # Missing title.
+    assert (
+        map_llm_extraction_to_zotero(
+            LLMExtractedMetadata.model_validate(
+                {
+                    "title": "",
+                    "authors": [{"first": "J", "last": "D"}],
+                    "item_type": "journalArticle",
+                }
+            )
+        )
+        is None
+    )
+    # Missing authors.
+    assert (
+        map_llm_extraction_to_zotero(
+            LLMExtractedMetadata.model_validate(
+                {"title": "T", "authors": [], "item_type": "journalArticle"}
+            )
+        )
+        is None
+    )
+
+
+def test_map_llm_rejects_unknown_item_type() -> None:
+    extracted = LLMExtractedMetadata.model_validate(
+        {
+            "title": "Good",
+            "authors": [{"first": "J", "last": "D"}],
+            "item_type": "newsletter",  # off the allow-list
+        }
+    )
+    assert map_llm_extraction_to_zotero(extracted) is None
+
+
+def test_map_llm_builds_zotero_payload() -> None:
+    extracted = LLMExtractedMetadata.model_validate(
+        {
+            "title": "Good paper",
+            "authors": [{"first": "Jane", "last": "Doe"}],
+            "year": 2022,
+            "item_type": "preprint",
+            "venue": "arXiv",
+            "doi": "10.1000/x",
+            "abstract": "abc",
+        }
+    )
+    payload = map_llm_extraction_to_zotero(extracted)
+    assert payload is not None
+    assert payload["title"] == "Good paper"
+    assert payload["itemType"] == "preprint"
+    assert payload["DOI"] == "10.1000/x"
+    assert payload["date"] == "2022"
+
+
+# ─── Smoke: 04d without OPENAI_API_KEY raises StageAbortedError ──────────
+
+
+def test_04d_without_api_key_raises_stage_aborted(tmp_path: Path) -> None:
+    from zotai.s1.handler import StageAbortedError
+
+    settings = _settings(tmp_path)  # empty openai.api_key
     try:
         run_enrich(substage="04d", settings=settings)
-    except NotImplementedError as exc:
-        assert "04d" in str(exc)
+    except StageAbortedError as exc:
+        assert "OPENAI_API_KEY" in str(exc)
     else:  # pragma: no cover
-        raise AssertionError("expected NotImplementedError")
-
-
-def test_04e_not_implemented_raises(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    try:
-        run_enrich(substage="04e", settings=settings)
-    except NotImplementedError as exc:
-        assert "04e" in str(exc)
-    else:  # pragma: no cover
-        raise AssertionError("expected NotImplementedError")
+        raise AssertionError("expected StageAbortedError")
