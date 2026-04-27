@@ -167,6 +167,11 @@ class BehaviorSettings(_GroupBase):
     dry_run: bool = False
     log_level: str = "INFO"
     user_email: str = ""
+    # Stage 04 cascade — LATAM coverage substages (ADR 018 + ADR 019).
+    # Default ON: the project's primary user is CONICET (LATAM-heavy
+    # corpus). Anglo-only corpora can opt out via env.
+    s1_enable_scielo: bool = True
+    s1_enable_doaj: bool = True
 
 
 class S2Settings(_GroupBase):
