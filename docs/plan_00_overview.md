@@ -57,14 +57,17 @@ Objetivo de más alto nivel: **multiplicar por 3-5x la cantidad de consultas bib
 
 ## 4. Orden de implementación
 
-**S1 → S3 → S2**
+**S1 → S2 → S3** (orden de valor entregado)
 
-Razones:
+Bajo ADR 015 (S2 es owner del índice de embeddings; S3 es lector puro), hasta que S2 corra `zotai s2 backfill-index` el ChromaDB está vacío y las queries del MCP en Claude Desktop devuelven resultados vacíos. Por eso el orden lineal es S1 → S2 → S3.
 
-- S1 produce la biblioteca sobre la que opera todo lo demás. Bloqueante.
-- S3 en esta fase significa **setup del servidor MCP** para Claude Desktop: instalar `zotero-mcp`, configurar `claude_desktop_config.json`, y dejarlo corriendo. **No** se ejecuta `zotero-mcp update-db` — bajo ADR 015, S2 es el owner del índice de embeddings y `update-db` no se usa nunca en el flujo operativo. El backfill inicial de ChromaDB se dispara con `zotai s2 backfill-index` cuando S2 esté implementado.
-- S3 setup es barato (~4h) y **cierra un ciclo de valor mínimo**: con S1 + S3 + el primer `backfill-index` de S2, el usuario ya tiene producto funcional para descubrimiento y cita. Posponer S3 al final dejaría al usuario con semanas de biblioteca sin forma de consultar.
-- S2 es el más complejo (~2-3 semanas de desarrollo incremental). Bajo ADR 015 también absorbe la responsabilidad del indexador de embeddings (`src/zotai/s2/indexing.py`) que mantiene el invariante "todo item no-cuarentenado en Zotero está en ChromaDB" via reconciliación por diff en cada ciclo del worker.
+Razones por hito:
+
+- **S1** produce la biblioteca sobre la que opera todo lo demás. Bloqueante para S2 y S3.
+- **S2** llena ChromaDB con su primer `zotai s2 backfill-index` (Sprint 1). Bajo ADR 015 absorbe la responsabilidad del indexador de embeddings (`src/zotai/s2/indexing.py`) que mantiene el invariante "todo item no-cuarentenado en Zotero está en ChromaDB" via reconciliación por diff en cada ciclo del worker. Es el más complejo (~2-3 semanas incrementales); los sprints 2/3/4 agregan triage UI, scoring, push y scheduling sobre la base de Sprint 1.
+- **S3** en esta fase significa **setup del servidor MCP** para Claude Desktop: instalar `zotero-mcp`, configurar `claude_desktop_config.json`, y dejarlo corriendo. **No** se ejecuta `zotero-mcp update-db` — bajo ADR 015 S2 es el owner del índice y `update-db` no se usa nunca en el flujo operativo. Setup barato (~0.5d). El primer producto funcional para descubrimiento y cita es S1 + S2 Sprint 1 + `backfill-index` + S3.
+
+**Dependencias técnicas vs orden de valor**: las issues #11 (S3) y #12 (S2 Sprint 1) declaran que ninguna depende de la otra a nivel de código — S2 no necesita el MCP server configurado, y S3 sólo necesita la biblioteca de S1 poblada. El setup de S3 (docs + config + scripts) puede empaquetarse en paralelo con S2 Sprint 1 si conviene operativamente. Pero el orden de valor entregado al usuario sigue siendo S1 → S2 → S3.
 
 ---
 
