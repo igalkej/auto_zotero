@@ -5,6 +5,7 @@
 **Deciders**: project owner
 **Supersedes**: —
 **Superseded by**: —
+**Amended by**: ADR 019 (substage `04bs` implements via Crossref Member 530 — `search.scielo.org`'s Solr endpoint is closed to anonymous clients; ADR 018 §"Sources evaluated" SciELO row, §Decision §1, and §"Implementation artefacts" §1 must be read with that amendment in mind).
 
 ---
 
