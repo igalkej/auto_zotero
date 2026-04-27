@@ -13,7 +13,7 @@ al cambio de precios de OpenAI.
 | **Stage 01** — LLM gate (clasificador académico) | ~$0.12 | $1.00 | `MAX_COST_USD_STAGE_01` |
 | **Stage 02** — OCR | $0 | — | — (tesseract local, sin costo marginal) |
 | **Stage 03** — Import vía OpenAlex | $0 | — | — (API gratis) |
-| **Stage 04a-c** — Cascade gratis | $0 | — | — (APIs gratis + rate limits) |
+| **Stage 04a / 04b / 04bs / 04bd / 04c** — Cascade gratis | $0 | — | — (APIs gratis + rate limits; ver ADR 018) |
 | **Stage 04d** — LLM extraction | ~$0.40 | $2.00 | `MAX_COST_USD_STAGE_04` |
 | **Stage 05** — Tagging LLM | ~$0.40 | $1.00 | `MAX_COST_USD_STAGE_05` |
 | **Stage 06** — Validation | $0 | — | — (read-only) |
@@ -57,29 +57,37 @@ No hay costo de API.
 OpenAlex es gratuito con `USER_EMAIL` en el User-Agent (el "polite
 pool", 100 req/s vs 10). Zotero local API es gratis. Costo = $0.
 
-### Stage 04a-c — Cascade gratis
+### Stage 04a / 04b / 04bs / 04bd / 04c — Cascade gratis
 
 - **04a**: regex + OpenAlex por DOI. Gratis.
 - **04b**: OpenAlex por búsqueda de título. Gratis.
+- **04bs**: SciELO por búsqueda de título (Solr). Gratis. Cobertura
+  LATAM-Spanish específica. Ver ADR 018.
+- **04bd**: DOAJ por búsqueda de título (Elasticsearch). Gratis,
+  rate limit 2 req/s. Cobertura open-access global. Ver ADR 018.
 - **04c**: Semantic Scholar por búsqueda de título. Gratis (rate limit
   100 req / 5 min sin key, 1 req/s con key).
 
-Estas tres ramas suelen resolver 80-90 % del fallthrough de Stage 03
-en corpus anglo-dominantes. Para LATAM-heavy cae a 40-60 %, lo que
-empuja más items a Stage 04d.
+Estas cinco ramas (toda la cascade gratis) suelen resolver 80-90 %
+del fallthrough de Stage 03 en corpus anglo-dominantes. Para
+LATAM-heavy post-ADR-018, las substages 04bs + 04bd absorben gran
+parte de la brecha de OpenAlex/Semantic Scholar y suben la cobertura
+gratis estimada a 70-80 %, lo que empuja menos items a Stage 04d que
+antes.
 
 ### Stage 04d — LLM extraction
 
-Sólo los items que sobrevivieron 04a-c van al LLM. `gpt-4o-mini` con
-primeras 2 páginas + prompt estructurado + 1 retry. ~$0.0004 por item.
+Sólo los items que sobrevivieron toda la cascade gratis (04a → 04b →
+04bs → 04bd → 04c) van al LLM. `gpt-4o-mini` con primeras 2 páginas +
+prompt estructurado + 1 retry. ~$0.0004 por item.
 
 **Estimación anglo-dominante**: 10-20 % del corpus × 1000 PDFs ×
 $0.0004 = **$0.04-0.08**.
 
-**Estimación LATAM-heavy** (plan_01 §3 Etapa 04 "Aviso"): 40 % del
-corpus × 1000 × $0.0004 = **$0.16**, pero con ruido de retries
-malformados y papers largos puede llegar a **$1.00**. Subí el cap a
-`MAX_COST_USD_STAGE_04=4.00` si tu corpus es LATAM-pesado.
+**Estimación LATAM-heavy post-ADR-018** (plan_01 §3 Etapa 04 "Aviso"):
+25-30 % del corpus × 1000 × $0.0004 = **$0.10-0.12**, pero con ruido
+de retries malformados y papers largos puede llegar a **$1.00**. Subí
+el cap a `MAX_COST_USD_STAGE_04=4.00` si tu corpus es LATAM-pesado.
 
 Cuando el cap trip, el orchestrator de `run-all` rutea los items
 restantes directo a 04e (quarantine) — no vuelve a llamar al LLM.
@@ -153,8 +161,9 @@ costo marginal por query (Anthropic lo incluye en la suscripción).
 
 - Correr Stage 01 con `--skip-llm-gate` si tenés confianza en que tu
   corpus está limpio de no-académicos (ahorra los ~$0.12 del gate).
-- Correr Stage 04d con `--substage 04d` aislado después de 04a-c
-  cuando querés monitorear el gasto del LLM específicamente.
+- Correr Stage 04d con `--substage 04d` aislado después de la cascade
+  gratis (04a → 04b → 04bs → 04bd → 04c) cuando querés monitorear
+  el gasto del LLM específicamente.
 - `--preview` antes de `--apply` en Stage 05 — el costo es el mismo
   (un call por ítem), pero preview no compromete las tags a Zotero
   si no te gustan.
