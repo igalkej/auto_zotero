@@ -161,7 +161,7 @@ zotai s1 ocr [--force-ocr] [--parallel N]
 **Ruta C** (fallback — captura todo lo que no entra por A):
 1. Aplica cuando `detected_doi is null`, cuando OpenAlex devuelve 404/no-match para el DOI, o cuando la metadata devuelta es insuficiente (sin título o sin autores).
 2. Subir PDF como attachment huérfano sin parent via `pyzotero.attachment_simple([path], parent_key=None)`. Zotero copia el PDF a su storage igual que en Ruta A; el item queda como attachment top-level sin metadata bibliográfica.
-3. Marcar `import_route='C'`, item queda pendiente de enrichment en Etapa 04. La cascada 04a-d intenta recuperar metadata por identificadores alternativos (arXiv/ISBN), título fuzzy-match contra OpenAlex/Semantic Scholar, y finalmente LLM extrayendo metadata del texto del PDF (grounded). 04e envía los que fallan a `Quarantine`.
+3. Marcar `import_route='C'`, item queda pendiente de enrichment en Etapa 04. La cascada 04a → 04b → 04bs → 04bd → 04c → 04d intenta recuperar metadata por identificadores alternativos (arXiv/ISBN), título fuzzy-match contra OpenAlex/SciELO/DOAJ/Semantic Scholar, y finalmente LLM extrayendo metadata del texto del PDF (grounded). 04e envía los que fallan a `Quarantine`.
 
 **Nota — ausencia de Ruta B y fuente de metadata en Ruta A**: versiones previas de este plan (a) incluían una Ruta B que llamaba al endpoint "Retrieve Metadata for PDFs" de Zotero Desktop y (b) describían la resolución de DOI en Ruta A como "via translator chain" de la Zotero API. Ambas decisiones implicaban depender de endpoints del Zotero connector / recognizer que no son API pública estable y son frágiles entre versiones del desktop. Ambas se eliminaron con el mismo rationale: consolidar la recuperación de metadata en clientes HTTP documentados (OpenAlex/Semantic Scholar) y en la cascada de Etapa 04. Ver ADR 010 para el detalle de por qué Ruta A usa OpenAlex en vez del translator de Zotero.
 
@@ -176,7 +176,7 @@ zotai s1 ocr [--force-ocr] [--parallel N]
 
 **Tasa esperada**:
 - Ruta A: 50-60% del corpus (items con DOI detectado y translator exitoso).
-- Ruta C: 40-50% del corpus (items sin DOI + items donde A falló). Todos pasan por Etapa 04. La cascada 04a-d apunta a recuperar metadata en ≥80% de estos antes de mandar el resto a cuarentena en 04e.
+- Ruta C: 40-50% del corpus (items sin DOI + items donde A falló). Todos pasan por Etapa 04. La cascada 04a → 04b → 04bs → 04bd → 04c → 04d apunta a recuperar metadata en ≥80% de estos antes de mandar el resto a cuarentena en 04e.
 
 **Aviso — corpus LATAM-heavy**. Los números anteriores asumen corpus
 anglo-dominante (revistas indexadas en CrossRef / PMC / arXiv). Para
@@ -230,8 +230,35 @@ zotai s1 import [--batch-size 50] [--dry-run]
   - Actualizar en Zotero via PATCH.
 - Rate limit: OpenAlex permite 10 req/sec sin autenticación, 100 con email en header. Setear `User-Agent: zotai/{version} (mailto:<user-email>)`.
 
-**04c — Match fuzzy contra Semantic Scholar**:
+**04bs — Match fuzzy contra SciELO** (per [ADR 018](decisions/018-scielo-and-doaj-substages.md)):
 - Solo para items que fallaron 04b.
+- Single-step contra `search.scielo.org` (Solr-backed):
+  - `GET https://search.scielo.org/?q=ti:"<title>"&format=json&output=site&count=5&lang=en`.
+- Mismo criterio fuzzy `rapidfuzz.fuzz.token_set_ratio` con threshold compartido `_FUZZ_THRESHOLD = 85`.
+- Si score >= 85:
+  - Hidratar item con metadata de SciELO (DOI cuando esté presente, título multilingual prefiriendo `doc["la"]`, autores, año, journal, abstract, language).
+  - Crear parent + reparent vía pyzotero (mismo dedup ADR 014).
+- Status output: `enriched_04bs`.
+- Default ON. Opt-out vía `S1_ENABLE_SCIELO=false` (sentido para corpus 100% anglo).
+- Sin API key, sin rate limit duro documentado. Polite pool con `User-Agent: zotai/{version} (mailto:<user-email>)`. SciELO está detrás de Cloudflare; UA polite typically passes.
+- Resilience: HTTP 403/429/502/503 → `no_progress` (cascade sigue a 04bd). Otras excepciones → `failed`.
+
+**04bd — Match fuzzy contra DOAJ** (per [ADR 018](decisions/018-scielo-and-doaj-substages.md)):
+- Solo para items que fallaron 04bs.
+- Single-step contra `doaj.org/api/v3/search/articles/`:
+  - `GET https://doaj.org/api/v3/search/articles/<URL-encoded query>?pageSize=5&page=1`.
+  - Query Elasticsearch syntax: `bibjson.title:"<title>"~`.
+- Mismo criterio fuzzy con threshold `_FUZZ_THRESHOLD = 85`.
+- Si score >= 85:
+  - Hidratar item con metadata de DOAJ (`bibjson.title`, `bibjson.author[].name`, `bibjson.year`, `bibjson.identifier[type=doi]`, `bibjson.journal.title`, `bibjson.journal.language[0]`, `bibjson.abstract`).
+  - Crear parent + reparent (mismo dedup ADR 014).
+- Status output: `enriched_04bd`.
+- Default ON. Opt-out vía `S1_ENABLE_DOAJ=false`.
+- Rate limit DOAJ: 2 req/s con bursts hasta 5. Holgado en el cascade (un request por item).
+- Resilience: misma política que 04bs.
+
+**04c — Match fuzzy contra Semantic Scholar**:
+- Solo para items que fallaron 04bd.
 - `GET https://api.semanticscholar.org/graph/v1/paper/search?query=<title>&limit=5`.
 - Mismo criterio fuzzy match.
 - Rate limit: 100 req/5min sin key. Si tenés `SEMANTIC_SCHOLAR_API_KEY`, 1 req/sec.
@@ -258,21 +285,21 @@ Do NOT invent information.
 - Persistir en CSV `quarantine_report.csv` con path original, primeras 200 chars del texto, razón de fracaso.
 
 **Presupuesto por sub-etapa**:
-- 04a-c: $0 (APIs gratuitas, solo rate limits).
+- 04a-c (incluyendo 04bs y 04bd): $0 (APIs gratuitas, solo rate limits).
 - 04d: max $2 configurable (`MAX_COST_USD_STAGE_04`, default 2.00). Si excede, pausar y pedir confirmación.
 
-**Aviso — corpus LATAM-heavy**. El default de $2 asume que la cascada 04a-c (gratis) resuelve 80%+ de los Ruta C. Para corpus LATAM-heavy (ver §3 Etapa 03 "Aviso — corpus LATAM-heavy"), la cobertura de OpenAlex y Semantic Scholar cae y una fracción mayor del corpus llega a 04d. Estimación pesimista: 40% del corpus (≈400 items sobre 1000) × $0.0004 / item = ~$1.60, todavía dentro de $2. Pero con ruido de retries malformados y papers largos puede exceder. **Recomendación para usuarios LATAM-heavy**: setear `MAX_COST_USD_STAGE_04=4.00` en `.env` antes de correr la etapa, y observar el costo real en el reporte de Etapa 06 para ajustar en corridas futuras. El cap duro sigue obligando a confirmación explícita antes de gastar extra.
+**Aviso — corpus LATAM-heavy**. La cascada 04a → 04b → 04bs → 04bd → 04c (toda gratis) está diseñada para resolver 80%+ de los Ruta C antes de tocar 04d. Para corpus LATAM-heavy (ver §3 Etapa 03 "Aviso — corpus LATAM-heavy"), el orden 04bs (SciELO) → 04bd (DOAJ) está específicamente dimensionado a esa cobertura: SciELO captura el grueso de revistas iberoamericanas no indexadas en Crossref; DOAJ captura el resto del open-access global. Estimación pesimista post-ADR-018: 25-30% del corpus (≈250-300 items sobre 1000) llega a 04d × $0.0004 / item = ~$1.00-1.20, holgadamente dentro de $2. Pero con ruido de retries malformados y papers largos puede exceder. **Recomendación para usuarios LATAM-heavy**: setear `MAX_COST_USD_STAGE_04=4.00` en `.env` antes de correr la etapa, y observar el costo real en el reporte de Etapa 06 para ajustar en corridas futuras. El cap duro sigue obligando a confirmación explícita antes de gastar extra.
 
 **Edge cases**:
 - API down (OpenAlex, Semantic Scholar): retry con backoff; tras 3 fallos, saltar item y continuar.
 - Título extraído es genérico ("Chapter 1", "Introduction"): detectable por longitud <5 palabras o coincidencia con blacklist. Saltar a siguiente sub-etapa directamente.
 - LLM retorna JSON malformado: reintentar 1 vez con mensaje corregir. Si falla, cuarentena.
 
-**Criterio de éxito etapa 04**: <10% del corpus original en cuarentena para corpus anglo-dominante; **<25% para corpus LATAM-heavy** hasta que el scope v1.1 agregue fuentes específicas (REDIB / SciELO / La Referencia / RedALyC). Etapa 06 Validation reporta el % real y permite al usuario decidir si (a) el corpus justifica priorizar la issue de fuentes LATAM o (b) el % está dentro de lo aceptable para este investigador.
+**Criterio de éxito etapa 04**: <10% del corpus original en cuarentena para corpus anglo-dominante; **<15-20% para corpus LATAM-heavy** post-ADR-018 (las substages 04bs SciELO + 04bd DOAJ cubren la fracción más grande de la brecha LATAM). El target previo de <25% queda como cota superior tolerada hasta que data empírica del corpus real muestre el número definitivo. Etapa 06 Validation reporta el % real y permite al usuario decidir si (a) el corpus justifica reabrir issue #46 para evaluar harvest de REDIB / RedALyC / La Referencia (fuentes que sólo exponen OAI-PMH y requieren índice local) o (b) el % está dentro de lo aceptable para este investigador.
 
 **CLI**:
 ```bash
-zotai s1 enrich [--substage {04a,04b,04c,04d,04e}] [--max-cost N]
+zotai s1 enrich [--substage {04a,04b,04bs,04bd,04c,04d,04e}] [--max-cost N]
 ```
 
 ---
