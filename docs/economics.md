@@ -61,8 +61,10 @@ pool", 100 req/s vs 10). Zotero local API es gratis. Costo = $0.
 
 - **04a**: regex + OpenAlex por DOI. Gratis.
 - **04b**: OpenAlex por búsqueda de título. Gratis.
-- **04bs**: SciELO por búsqueda de título (Solr). Gratis. Cobertura
-  LATAM-Spanish específica. Ver ADR 018.
+- **04bs**: SciELO via Crossref Member 530 por búsqueda de título.
+  Gratis. Mejora ranking top-5 para queries LATAM-Spanish (filter
+  narrows el search space al catálogo SciELO-en-Crossref). Ver ADR 018
+  + amendment ADR 019.
 - **04bd**: DOAJ por búsqueda de título (Elasticsearch). Gratis,
   rate limit 2 req/s. Cobertura open-access global. Ver ADR 018.
 - **04c**: Semantic Scholar por búsqueda de título. Gratis (rate limit

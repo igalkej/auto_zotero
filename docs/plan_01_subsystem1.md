@@ -230,17 +230,18 @@ zotai s1 import [--batch-size 50] [--dry-run]
   - Actualizar en Zotero via PATCH.
 - Rate limit: OpenAlex permite 10 req/sec sin autenticación, 100 con email en header. Setear `User-Agent: zotai/{version} (mailto:<user-email>)`.
 
-**04bs — Match fuzzy contra SciELO** (per [ADR 018](decisions/018-scielo-and-doaj-substages.md)):
+**04bs — Match fuzzy contra SciELO via Crossref Member 530** (per [ADR 018](decisions/018-scielo-and-doaj-substages.md), amended by [ADR 019](decisions/019-scielo-substage-via-crossref-mirror.md)):
 - Solo para items que fallaron 04b.
-- Single-step contra `search.scielo.org` (Solr-backed):
-  - `GET https://search.scielo.org/?q=ti:"<title>"&format=json&output=site&count=5&lang=en`.
-- Mismo criterio fuzzy `rapidfuzz.fuzz.token_set_ratio` con threshold compartido `_FUZZ_THRESHOLD = 85`.
+- Single-step contra Crossref filtrado a `member:530` (identificador Crossref de SciELO):
+  - `GET https://api.crossref.org/works?query.title=<title>&filter=member:530&rows=5&select=DOI,title,author,published,container-title,abstract,type`.
+- Mismo criterio fuzzy `rapidfuzz.fuzz.token_set_ratio` con threshold compartido `_FUZZ_THRESHOLD = 85` contra `record["title"][0]`.
 - Si score >= 85:
-  - Hidratar item con metadata de SciELO (DOI cuando esté presente, título multilingual prefiriendo `doc["la"]`, autores, año, journal, abstract, language).
+  - Hidratar item con metadata de Crossref (DOI siempre presente; título de `title[0]`; autores con ORCID y afiliación de `author[]`; año/mes de `published.date-parts[0]`; journal de `container-title[0]`; abstract con JATS XML stripped cuando está presente; `itemType` hardcodeado a `journalArticle`).
   - Crear parent + reparent vía pyzotero (mismo dedup ADR 014).
 - Status output: `enriched_04bs`.
 - Default ON. Opt-out vía `S1_ENABLE_SCIELO=false` (sentido para corpus 100% anglo).
-- Sin API key, sin rate limit duro documentado. Polite pool con `User-Agent: zotai/{version} (mailto:<user-email>)`. SciELO está detrás de Cloudflare; UA polite typically passes.
+- Sin API key. Polite pool con `User-Agent: zotai/{version} (mailto:<user-email>)` (mismo pattern que 04b).
+- **Por qué Crossref-filter en vez de `search.scielo.org`** (ver ADR 019): el endpoint Solr público está bloqueado para clientes anónimos (403 nginx en toda variante de query/header probada); ArticleMeta sólo soporta lookup por SciELO PID, no fuzzy-title-search. Member 530 es el ID Crossref de SciELO; el filter narrows el search space al catálogo SciELO-en-Crossref, mejorando ranking top-5 para queries LATAM-Spanish vs OpenAlex sin filtro. El value-add del substage es ranking-induced, no coverage-induced (todo paper que retorna también está en OpenAlex).
 - Resilience: HTTP 403/429/502/503 → `no_progress` (cascade sigue a 04bd). Otras excepciones → `failed`.
 
 **04bd — Match fuzzy contra DOAJ** (per [ADR 018](decisions/018-scielo-and-doaj-substages.md)):
