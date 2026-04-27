@@ -22,10 +22,13 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+import httpx
 from sqlmodel import Session, select
 
+from zotai.api.doaj import map_doaj_to_zotero
 from zotai.api.openai_client import BudgetExceededError
-from zotai.config import PathSettings, Settings, ZoteroSettings
+from zotai.api.scielo import map_scielo_to_zotero
+from zotai.config import BehaviorSettings, PathSettings, Settings, ZoteroSettings
 from zotai.s1.stage_04_enrich import (
     LLMExtractedMetadata,
     map_llm_extraction_to_zotero,
@@ -225,6 +228,54 @@ class FakeSemanticScholarClient:
         return self._search_responses.get(query, [])
 
 
+class FakeSciELoClient:
+    """Fake :class:`zotai.api.scielo.SciELoClient` for the 04bs tests.
+
+    Returns scripted responses keyed by query title, or raises a queued
+    exception (used to simulate Cloudflare 403, rate-limit 429, etc.).
+    """
+
+    def __init__(
+        self,
+        search_responses: dict[str, list[dict[str, Any]]] | None = None,
+        *,
+        raise_on_search: Exception | None = None,
+    ) -> None:
+        self._search_responses = search_responses or {}
+        self._raise = raise_on_search
+        self.search_calls: list[tuple[str, int]] = []
+
+    async def search_articles(
+        self, title: str, *, per_page: int = 5
+    ) -> list[dict[str, Any]]:
+        self.search_calls.append((title, per_page))
+        if self._raise is not None:
+            raise self._raise
+        return self._search_responses.get(title, [])
+
+
+class FakeDOAJClient:
+    """Fake :class:`zotai.api.doaj.DOAJClient` for the 04bd tests."""
+
+    def __init__(
+        self,
+        search_responses: dict[str, list[dict[str, Any]]] | None = None,
+        *,
+        raise_on_search: Exception | None = None,
+    ) -> None:
+        self._search_responses = search_responses or {}
+        self._raise = raise_on_search
+        self.search_calls: list[tuple[str, int]] = []
+
+    async def search_articles(
+        self, title: str, *, per_page: int = 5
+    ) -> list[dict[str, Any]]:
+        self.search_calls.append((title, per_page))
+        if self._raise is not None:
+            raise self._raise
+        return self._search_responses.get(title, [])
+
+
 def _no_sleep() -> Callable[[float], Awaitable[None]]:
     async def _s(_: float) -> None:
         return None
@@ -235,7 +286,19 @@ def _no_sleep() -> Callable[[float], Awaitable[None]]:
 # ─── Fixtures / helpers ───────────────────────────────────────────────────
 
 
-def _settings(tmp_path: Path) -> Settings:
+def _settings(
+    tmp_path: Path,
+    *,
+    enable_scielo: bool = False,
+    enable_doaj: bool = False,
+) -> Settings:
+    """Test fixture for ``Settings``.
+
+    The 04bs / 04bd flags default to ``False`` here so existing tests that
+    pre-date ADR 018 don't try to construct real
+    :class:`SciELoClient` / :class:`DOAJClient` instances. New tests that
+    cover the substages set the flags explicitly.
+    """
     return Settings(
         paths=PathSettings(
             state_db=tmp_path / "state.db",
@@ -244,6 +307,10 @@ def _settings(tmp_path: Path) -> Settings:
             pdf_source_folders=[],
         ),
         zotero=ZoteroSettings(library_id="123", library_type="user", local_api=True),
+        behavior=BehaviorSettings(
+            s1_enable_scielo=enable_scielo,
+            s1_enable_doaj=enable_doaj,
+        ),
     )
 
 
@@ -1675,3 +1742,658 @@ def test_04d_without_api_key_raises_stage_aborted(tmp_path: Path) -> None:
         assert "OPENAI_API_KEY" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected StageAbortedError")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 04bs (SciELO via Crossref Member 530, ADR 018 + ADR 019) and
+# 04bd (DOAJ, ADR 018) tests.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _good_crossref_record(
+    doi: str = "10.1590/test-scielo-doi",
+    title: str = "Informalidad laboral en Argentina",
+    *,
+    abstract: str | None = "<jats:p>Resumen <jats:italic>importante</jats:italic></jats:p>",
+    container: str = "Desarrollo Económico",
+    year: int = 2024,
+    month: int | None = 7,
+) -> dict[str, Any]:
+    """Build a Crossref ``works`` record matching what filter:member:530 returns."""
+    parts = [year]
+    if month is not None:
+        parts.append(month)
+    rec: dict[str, Any] = {
+        "DOI": doi,
+        "title": [title],
+        "container-title": [container],
+        "type": "journal-article",
+        "member": "530",
+        "publisher": "FapUNIFESP (SciELO)",
+        "published": {"date-parts": [parts]},
+        "author": [
+            {"given": "Jane", "family": "Doe", "ORCID": "https://orcid.org/0000-0000"},
+            {"given": "John", "family": "Smith"},
+        ],
+    }
+    if abstract is not None:
+        rec["abstract"] = abstract
+    return rec
+
+
+def _good_doaj_record(
+    doi: str = "10.5555/doaj-test-doi",
+    title: str = "An open-access economics paper",
+    *,
+    journal: str = "Revista de Economía",
+    year: str = "2023",
+    month: str | None = "5",
+    abstract: str = "Open-access abstract content.",
+) -> dict[str, Any]:
+    """Build a DOAJ article record (mimics ``payload['results'][i]``)."""
+    bib: dict[str, Any] = {
+        "title": title,
+        "year": year,
+        "author": [{"name": "Doe, Jane"}, {"name": "Smith, John"}],
+        "journal": {"title": journal, "country": "AR", "language": ["spa"]},
+        "abstract": abstract,
+        "identifier": [{"type": "doi", "id": doi}],
+    }
+    if month is not None:
+        bib["month"] = month
+    return {"id": "doaj-internal-id", "bibjson": bib}
+
+
+def _http_status_error(status: int, url: str) -> httpx.HTTPStatusError:
+    """Build a ready-to-raise ``HTTPStatusError`` for resilience tests."""
+    request = httpx.Request("GET", url)
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError(f"status {status}", request=request, response=response)
+
+
+# ─── Mapper tests: SciELO (Crossref-shape) ──────────────────────────────
+
+
+def test_map_scielo_to_zotero_full_payload() -> None:
+    rec = _good_crossref_record()
+    payload = map_scielo_to_zotero(rec)
+    assert payload is not None
+    assert payload["itemType"] == "journalArticle"
+    assert payload["title"] == "Informalidad laboral en Argentina"
+    assert payload["DOI"] == "10.1590/test-scielo-doi"
+    assert payload["publicationTitle"] == "Desarrollo Económico"
+    assert payload["date"] == "2024-07"
+    assert payload["creators"][0] == {
+        "creatorType": "author",
+        "firstName": "Jane",
+        "lastName": "Doe",
+    }
+    assert "Resumen importante" in payload["abstractNote"]
+    assert "<" not in payload["abstractNote"], "JATS tags must be stripped"
+
+
+def test_map_scielo_to_zotero_returns_none_on_missing_title() -> None:
+    rec = _good_crossref_record()
+    rec["title"] = []
+    assert map_scielo_to_zotero(rec) is None
+    rec["title"] = [""]
+    assert map_scielo_to_zotero(rec) is None
+
+
+def test_map_scielo_to_zotero_returns_none_on_missing_authors() -> None:
+    rec = _good_crossref_record()
+    rec["author"] = []
+    assert map_scielo_to_zotero(rec) is None
+    # Authors with neither given nor family nor name → still None.
+    rec["author"] = [{"sequence": "first"}]
+    assert map_scielo_to_zotero(rec) is None
+
+
+def test_map_scielo_to_zotero_decodes_html_entities_and_year_only() -> None:
+    rec = _good_crossref_record(month=None)
+    rec["container-title"] = ["Ciência &amp; Saúde Coletiva"]
+    payload = map_scielo_to_zotero(rec)
+    assert payload is not None
+    assert payload["publicationTitle"] == "Ciência & Saúde Coletiva"
+    assert payload["date"] == "2024", "year-only date when no month available"
+
+
+# ─── Mapper tests: DOAJ ──────────────────────────────────────────────────
+
+
+def test_map_doaj_to_zotero_full_payload() -> None:
+    rec = _good_doaj_record()
+    payload = map_doaj_to_zotero(rec)
+    assert payload is not None
+    assert payload["itemType"] == "journalArticle"
+    assert payload["title"] == "An open-access economics paper"
+    assert payload["DOI"] == "10.5555/doaj-test-doi"
+    assert payload["publicationTitle"] == "Revista de Economía"
+    assert payload["date"] == "2023-05"
+    # "Doe, Jane" → firstName="Jane", lastName="Doe".
+    assert payload["creators"][0] == {
+        "creatorType": "author",
+        "firstName": "Jane",
+        "lastName": "Doe",
+    }
+
+
+def test_map_doaj_to_zotero_returns_none_on_missing_title() -> None:
+    rec = _good_doaj_record()
+    rec["bibjson"]["title"] = ""
+    assert map_doaj_to_zotero(rec) is None
+    del rec["bibjson"]["title"]
+    assert map_doaj_to_zotero(rec) is None
+
+
+def test_map_doaj_to_zotero_returns_none_on_missing_authors() -> None:
+    rec = _good_doaj_record()
+    rec["bibjson"]["author"] = []
+    assert map_doaj_to_zotero(rec) is None
+    rec["bibjson"]["author"] = [{"affiliation": "X"}]  # no name
+    assert map_doaj_to_zotero(rec) is None
+
+
+def test_map_doaj_to_zotero_extracts_doi_from_identifier_list() -> None:
+    rec = _good_doaj_record()
+    rec["bibjson"]["identifier"] = [
+        {"type": "issn", "id": "1234-5678"},
+        {"type": "doi", "id": "10.9999/correct-doi"},
+        {"type": "eissn", "id": "8765-4321"},
+    ]
+    payload = map_doaj_to_zotero(rec)
+    assert payload is not None
+    assert payload["DOI"] == "10.9999/correct-doi"
+
+
+# ─── 04bs cascade: title match → reparent ───────────────────────────────
+
+
+def test_04bs_title_match_creates_parent_and_reparents(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path, enable_scielo=True)
+    pdf = _write_pdf(tmp_path / "pdfs" / "bs1.pdf")
+    orphan_key = "ORPH-BS1"
+    title = "Política fiscal y crecimiento"
+    _seed_orphan(
+        settings,
+        sha="b" * 63 + "s",
+        source_path=pdf,
+        detected_doi=None,
+        zotero_item_key=orphan_key,
+    )
+    _patch_extract_probable_title(monkeypatch, {pdf.name: title})
+
+    zot = FakeZoteroClient(orphans={orphan_key: {"key": orphan_key}})
+    sce = FakeSciELoClient(
+        search_responses={title: [_good_crossref_record(title=title)]},
+    )
+
+    result = run_enrich(
+        substage="04bs",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        scielo_client=sce,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_enriched_04bs == 1
+    assert sce.search_calls == [(title, 5)]
+    assert len(zot.created_items) == 1
+    assert zot.created_items[0]["payload"]["DOI"] == "10.1590/test-scielo-doi"
+    assert len(zot.updated_items) == 1, "orphan must be reparented"
+
+
+def test_04bs_no_fuzzy_match_is_no_progress(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path, enable_scielo=True)
+    pdf = _write_pdf(tmp_path / "pdfs" / "bs2.pdf")
+    orphan_key = "ORPH-BS2"
+    title = "An obscure recalcitrant title"
+    _seed_orphan(
+        settings,
+        sha="c" * 64,
+        source_path=pdf,
+        detected_doi=None,
+        zotero_item_key=orphan_key,
+    )
+    _patch_extract_probable_title(monkeypatch, {pdf.name: title})
+
+    zot = FakeZoteroClient(orphans={orphan_key: {"key": orphan_key}})
+    sce = FakeSciELoClient(
+        search_responses={
+            title: [_good_crossref_record(title="Totally unrelated paper")]
+        },
+    )
+
+    result = run_enrich(
+        substage="04bs",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        scielo_client=sce,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_enriched_04bs == 0
+    assert result.items_no_progress == 1
+    assert zot.created_items == []
+
+
+# ─── 04bd cascade: title match → reparent ───────────────────────────────
+
+
+def test_04bd_title_match_creates_parent_and_reparents(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path, enable_doaj=True)
+    pdf = _write_pdf(tmp_path / "pdfs" / "bd1.pdf")
+    orphan_key = "ORPH-BD1"
+    title = "Open access study on inflation"
+    _seed_orphan(
+        settings,
+        sha="d" * 64,
+        source_path=pdf,
+        detected_doi=None,
+        zotero_item_key=orphan_key,
+    )
+    _patch_extract_probable_title(monkeypatch, {pdf.name: title})
+
+    zot = FakeZoteroClient(orphans={orphan_key: {"key": orphan_key}})
+    do = FakeDOAJClient(
+        search_responses={title: [_good_doaj_record(title=title)]},
+    )
+
+    result = run_enrich(
+        substage="04bd",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        doaj_client=do,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_enriched_04bd == 1
+    assert do.search_calls == [(title, 5)]
+    assert len(zot.created_items) == 1
+    assert zot.created_items[0]["payload"]["DOI"] == "10.5555/doaj-test-doi"
+
+
+def test_04bd_no_fuzzy_match_is_no_progress(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path, enable_doaj=True)
+    pdf = _write_pdf(tmp_path / "pdfs" / "bd2.pdf")
+    orphan_key = "ORPH-BD2"
+    title = "Another nothing-matches title"
+    _seed_orphan(
+        settings,
+        sha="e" * 64,
+        source_path=pdf,
+        detected_doi=None,
+        zotero_item_key=orphan_key,
+    )
+    _patch_extract_probable_title(monkeypatch, {pdf.name: title})
+
+    zot = FakeZoteroClient(orphans={orphan_key: {"key": orphan_key}})
+    do = FakeDOAJClient(
+        search_responses={title: [_good_doaj_record(title="Off-topic paper")]},
+    )
+
+    result = run_enrich(
+        substage="04bd",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        doaj_client=do,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_enriched_04bd == 0
+    assert result.items_no_progress == 1
+
+
+# ─── Resilience: HTTP transients fall through, others fail ──────────────
+
+
+def test_04bs_403_falls_through_as_no_progress(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path, enable_scielo=True)
+    pdf = _write_pdf(tmp_path / "pdfs" / "bs403.pdf")
+    orphan_key = "ORPH-BS403"
+    title = "Some title"
+    _seed_orphan(
+        settings,
+        sha="f" * 64,
+        source_path=pdf,
+        zotero_item_key=orphan_key,
+    )
+    _patch_extract_probable_title(monkeypatch, {pdf.name: title})
+
+    zot = FakeZoteroClient(orphans={orphan_key: {"key": orphan_key}})
+    sce = FakeSciELoClient(
+        raise_on_search=_http_status_error(403, "https://api.crossref.org/works")
+    )
+
+    result = run_enrich(
+        substage="04bs",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        scielo_client=sce,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_no_progress == 1
+    assert result.items_failed == 0
+    assert result.rows[0].error == "scielo_unavailable:403"
+
+
+def test_04bs_500_returns_failed(tmp_path: Path, monkeypatch: Any) -> None:
+    settings = _settings(tmp_path, enable_scielo=True)
+    pdf = _write_pdf(tmp_path / "pdfs" / "bs500.pdf")
+    orphan_key = "ORPH-BS500"
+    title = "Unexpected server error path"
+    _seed_orphan(
+        settings,
+        sha="g" * 64,
+        source_path=pdf,
+        zotero_item_key=orphan_key,
+    )
+    _patch_extract_probable_title(monkeypatch, {pdf.name: title})
+
+    zot = FakeZoteroClient(orphans={orphan_key: {"key": orphan_key}})
+    sce = FakeSciELoClient(
+        raise_on_search=_http_status_error(500, "https://api.crossref.org/works")
+    )
+
+    result = run_enrich(
+        substage="04bs",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        scielo_client=sce,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_failed == 1
+    assert result.items_no_progress == 0
+    assert result.rows[0].status == "failed"
+    assert "scielo_error" in (result.rows[0].error or "")
+
+
+def test_04bd_429_falls_through_as_no_progress(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = _settings(tmp_path, enable_doaj=True)
+    pdf = _write_pdf(tmp_path / "pdfs" / "bd429.pdf")
+    orphan_key = "ORPH-BD429"
+    title = "Rate limited query"
+    _seed_orphan(
+        settings,
+        sha="h" * 64,
+        source_path=pdf,
+        zotero_item_key=orphan_key,
+    )
+    _patch_extract_probable_title(monkeypatch, {pdf.name: title})
+
+    zot = FakeZoteroClient(orphans={orphan_key: {"key": orphan_key}})
+    do = FakeDOAJClient(
+        raise_on_search=_http_status_error(429, "https://doaj.org/api/v3/search/articles/x")
+    )
+
+    result = run_enrich(
+        substage="04bd",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        doaj_client=do,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_no_progress == 1
+    assert result.rows[0].error == "doaj_unavailable:429"
+
+
+def test_04bd_500_returns_failed(tmp_path: Path, monkeypatch: Any) -> None:
+    settings = _settings(tmp_path, enable_doaj=True)
+    pdf = _write_pdf(tmp_path / "pdfs" / "bd500.pdf")
+    orphan_key = "ORPH-BD500"
+    title = "Server error path"
+    _seed_orphan(
+        settings,
+        sha="i" * 64,
+        source_path=pdf,
+        zotero_item_key=orphan_key,
+    )
+    _patch_extract_probable_title(monkeypatch, {pdf.name: title})
+
+    zot = FakeZoteroClient(orphans={orphan_key: {"key": orphan_key}})
+    do = FakeDOAJClient(
+        raise_on_search=_http_status_error(500, "https://doaj.org/api/v3/search/articles/x")
+    )
+
+    result = run_enrich(
+        substage="04bd",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        doaj_client=do,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_failed == 1
+    assert "doaj_error" in (result.rows[0].error or "")
+
+
+# ─── Feature flags ────────────────────────────────────────────────────────
+
+
+def test_04bs_disabled_skips_substage_in_cascade(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """When S1_ENABLE_SCIELO=false, the cascade goes 04b → 04bd (no 04bs)."""
+    settings = _settings(tmp_path, enable_scielo=False, enable_doaj=True)
+    pdf = _write_pdf(tmp_path / "pdfs" / "noflag.pdf")
+    orphan_key = "ORPH-NOFLAG"
+    title = "Disabled scielo cascade"
+    _seed_orphan(
+        settings,
+        sha="j" * 64,
+        source_path=pdf,
+        zotero_item_key=orphan_key,
+    )
+    _patch_extract_text_pages(monkeypatch, {pdf.name: ["body", "", ""]})
+    _patch_extract_probable_title(monkeypatch, {pdf.name: title})
+
+    zot = FakeZoteroClient(orphans={orphan_key: {"key": orphan_key}})
+    oa = FakeOpenAlexClient(search_responses={title: []})
+    do = FakeDOAJClient(search_responses={title: [_good_doaj_record(title=title)]})
+    ss = FakeSemanticScholarClient()
+    llm = FakeOpenAIClient()
+
+    result = run_enrich(
+        substage="all",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        openalex_client=oa,  # type: ignore[arg-type]
+        doaj_client=do,  # type: ignore[arg-type]
+        semantic_scholar_client=ss,  # type: ignore[arg-type]
+        openai_client=llm,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_enriched_04bd == 1, "04bd must hit when 04bs is disabled"
+    assert result.items_enriched_04bs == 0
+
+
+def test_04bs_explicit_substage_aborts_when_disabled(tmp_path: Path) -> None:
+    from zotai.s1.handler import StageAbortedError
+
+    settings = _settings(tmp_path, enable_scielo=False)
+    try:
+        run_enrich(substage="04bs", settings=settings)
+    except StageAbortedError as exc:
+        assert "S1_ENABLE_SCIELO" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected StageAbortedError")
+
+
+def test_04bd_disabled_skips_substage_in_cascade(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """When S1_ENABLE_DOAJ=false, the cascade skips 04bd cleanly."""
+    settings = _settings(tmp_path, enable_scielo=True, enable_doaj=False)
+    pdf = _write_pdf(tmp_path / "pdfs" / "noflagd.pdf")
+    orphan_key = "ORPH-NOFLAGD"
+    title = "Disabled doaj cascade"
+    _seed_orphan(
+        settings,
+        sha="k" * 64,
+        source_path=pdf,
+        zotero_item_key=orphan_key,
+    )
+    _patch_extract_text_pages(monkeypatch, {pdf.name: ["body", "", ""]})
+    _patch_extract_probable_title(monkeypatch, {pdf.name: title})
+
+    zot = FakeZoteroClient(orphans={orphan_key: {"key": orphan_key}})
+    oa = FakeOpenAlexClient(search_responses={title: []})
+    sce = FakeSciELoClient(
+        search_responses={title: [_good_crossref_record(title=title)]}
+    )
+    ss = FakeSemanticScholarClient()
+    llm = FakeOpenAIClient()
+
+    result = run_enrich(
+        substage="all",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        openalex_client=oa,  # type: ignore[arg-type]
+        scielo_client=sce,  # type: ignore[arg-type]
+        semantic_scholar_client=ss,  # type: ignore[arg-type]
+        openai_client=llm,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_enriched_04bs == 1
+    assert result.items_enriched_04bd == 0
+
+
+def test_04bd_explicit_substage_aborts_when_disabled(tmp_path: Path) -> None:
+    from zotai.s1.handler import StageAbortedError
+
+    settings = _settings(tmp_path, enable_doaj=False)
+    try:
+        run_enrich(substage="04bd", settings=settings)
+    except StageAbortedError as exc:
+        assert "S1_ENABLE_DOAJ" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected StageAbortedError")
+
+
+# ─── Combined cascade — 04bs surfaces before 04bd ────────────────────────
+
+
+def test_cascade_uses_04bs_after_04b_misses(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """``all``: 04a/04b miss, 04bs hits → 04bd / 04c / 04d are not invoked."""
+    settings = _settings(tmp_path, enable_scielo=True, enable_doaj=True)
+    pdf = _write_pdf(tmp_path / "pdfs" / "cas1.pdf")
+    orphan_key = "ORPH-CAS1"
+    title = "Cascade hit at 04bs"
+    _seed_orphan(
+        settings,
+        sha="l" * 64,
+        source_path=pdf,
+        zotero_item_key=orphan_key,
+    )
+    _patch_extract_text_pages(monkeypatch, {pdf.name: ["body without ids", "", ""]})
+    _patch_extract_probable_title(monkeypatch, {pdf.name: title})
+
+    zot = FakeZoteroClient(orphans={orphan_key: {"key": orphan_key}})
+    oa = FakeOpenAlexClient(search_responses={title: []})
+    sce = FakeSciELoClient(
+        search_responses={title: [_good_crossref_record(title=title)]}
+    )
+    do = FakeDOAJClient(search_responses={title: [_good_doaj_record(title=title)]})
+    ss = FakeSemanticScholarClient(search_responses={title: [_ss_paper(title)]})
+    llm = FakeOpenAIClient()
+
+    result = run_enrich(
+        substage="all",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        openalex_client=oa,  # type: ignore[arg-type]
+        scielo_client=sce,  # type: ignore[arg-type]
+        doaj_client=do,  # type: ignore[arg-type]
+        semantic_scholar_client=ss,  # type: ignore[arg-type]
+        openai_client=llm,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_enriched_04bs == 1
+    assert result.items_enriched_04bd == 0
+    assert do.search_calls == [], "DOAJ must not be called once 04bs hits"
+    assert ss.search_calls == [], "Semantic Scholar must not be called"
+    assert llm.extract_calls == []
+
+
+def test_cascade_uses_04bd_when_04b_and_04bs_miss(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """``all``: 04a/04b/04bs miss, 04bd hits → 04c / 04d are not invoked."""
+    settings = _settings(tmp_path, enable_scielo=True, enable_doaj=True)
+    pdf = _write_pdf(tmp_path / "pdfs" / "cas2.pdf")
+    orphan_key = "ORPH-CAS2"
+    title = "Cascade hit at 04bd"
+    _seed_orphan(
+        settings,
+        sha="m" * 64,
+        source_path=pdf,
+        zotero_item_key=orphan_key,
+    )
+    _patch_extract_text_pages(monkeypatch, {pdf.name: ["body without ids", "", ""]})
+    _patch_extract_probable_title(monkeypatch, {pdf.name: title})
+
+    zot = FakeZoteroClient(orphans={orphan_key: {"key": orphan_key}})
+    oa = FakeOpenAlexClient(search_responses={title: []})
+    sce = FakeSciELoClient(
+        search_responses={title: [_good_crossref_record(title="Off-topic")]}
+    )
+    do = FakeDOAJClient(search_responses={title: [_good_doaj_record(title=title)]})
+    ss = FakeSemanticScholarClient(search_responses={title: [_ss_paper(title)]})
+    llm = FakeOpenAIClient()
+
+    result = run_enrich(
+        substage="all",
+        settings=settings,
+        zotero_client=zot,  # type: ignore[arg-type]
+        openalex_client=oa,  # type: ignore[arg-type]
+        scielo_client=sce,  # type: ignore[arg-type]
+        doaj_client=do,  # type: ignore[arg-type]
+        semantic_scholar_client=ss,  # type: ignore[arg-type]
+        openai_client=llm,  # type: ignore[arg-type]
+        sleep=_no_sleep(),
+    )
+
+    assert result.items_enriched_04bd == 1
+    assert result.items_enriched_04bs == 0
+    assert sce.search_calls == [(title, 5)], "SciELO is consulted before DOAJ"
+    assert ss.search_calls == [], "Semantic Scholar must not be called once 04bd hits"
+
+
+# ─── Spec compliance with ADR 018 + ADR 019 ──────────────────────────────
+
+
+def test_default_flags_are_on() -> None:
+    """ADR 018 + ADR 019 §Decision: both new substage flags default ON."""
+    fields = BehaviorSettings.model_fields
+    assert fields["s1_enable_scielo"].default is True
+    assert fields["s1_enable_doaj"].default is True
+
+
+def test_env_var_names_match_spec(tmp_path: Path, monkeypatch: Any) -> None:
+    """Spec: env vars S1_ENABLE_SCIELO / S1_ENABLE_DOAJ map to the flags."""
+    monkeypatch.chdir(tmp_path)  # avoid the repo's local .env
+    monkeypatch.setenv("S1_ENABLE_SCIELO", "false")
+    monkeypatch.setenv("S1_ENABLE_DOAJ", "false")
+    b = BehaviorSettings()
+    assert b.s1_enable_scielo is False
+    assert b.s1_enable_doaj is False

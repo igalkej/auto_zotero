@@ -102,6 +102,8 @@ def _fake_enrich(**_: Any) -> EnrichResult:
         items_failed=0,
         items_enriched_04a=0,
         items_enriched_04b=1,
+        items_enriched_04bs=0,
+        items_enriched_04bd=0,
         items_enriched_04c=0,
         items_enriched_04d=0,
         items_quarantined=0,
