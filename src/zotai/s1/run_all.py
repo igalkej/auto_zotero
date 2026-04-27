@@ -197,6 +197,7 @@ def run_all(
                 summary=(
                     f"processed={enr.items_processed} failed={enr.items_failed} "
                     f"04a={enr.items_enriched_04a} 04b={enr.items_enriched_04b} "
+                    f"04bs={enr.items_enriched_04bs} 04bd={enr.items_enriched_04bd} "
                     f"04c={enr.items_enriched_04c} 04d={enr.items_enriched_04d} "
                     f"quarantined={enr.items_quarantined}"
                 ),

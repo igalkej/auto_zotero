@@ -268,11 +268,14 @@ def s1_enrich(
             "--substage",
             help=(
                 "Which enrichment substage to run. '04a' (identifier "
-                "extraction), '04b' (OpenAlex fuzzy), '04c' (Semantic "
-                "Scholar fuzzy), '04d' (gpt-4o-mini extraction — costs "
-                "money, bounded by MAX_COST_USD_STAGE_04), '04e' "
-                "(Quarantine), or 'all' for the full per-item cascade "
-                "04a → 04b → 04c → 04d → 04e. See plan_01 §3 Etapa 04."
+                "extraction), '04b' (OpenAlex fuzzy), '04bs' (SciELO "
+                "via Crossref Member 530, ADR 018 + ADR 019), '04bd' "
+                "(DOAJ fuzzy, ADR 018), '04c' (Semantic Scholar fuzzy), "
+                "'04d' (gpt-4o-mini extraction — costs money, bounded "
+                "by MAX_COST_USD_STAGE_04), '04e' (Quarantine), or "
+                "'all' for the full per-item cascade "
+                "04a → 04b → 04bs → 04bd → 04c → 04d → 04e. "
+                "See plan_01 §3 Etapa 04."
             ),
         ),
     ] = "04a",
@@ -298,10 +301,10 @@ def s1_enrich(
     settings = Settings()
     dry_run = bool(ctx.obj.get("dry_run", False)) or settings.behavior.dry_run
 
-    if substage not in ("04a", "04b", "04c", "04d", "04e", "all"):
+    if substage not in ("04a", "04b", "04bs", "04bd", "04c", "04d", "04e", "all"):
         typer.secho(
             f"Substage '{substage}' is not valid. Choose one of: "
-            "'04a' | '04b' | '04c' | '04d' | '04e' | 'all'.",
+            "'04a' | '04b' | '04bs' | '04bd' | '04c' | '04d' | '04e' | 'all'.",
             err=True,
             fg=typer.colors.YELLOW,
         )
@@ -327,6 +330,8 @@ def s1_enrich(
         f"processed={result.items_processed} failed={result.items_failed} "
         f"enriched_04a={result.items_enriched_04a} "
         f"enriched_04b={result.items_enriched_04b} "
+        f"enriched_04bs={result.items_enriched_04bs} "
+        f"enriched_04bd={result.items_enriched_04bd} "
         f"enriched_04c={result.items_enriched_04c} "
         f"enriched_04d={result.items_enriched_04d} "
         f"quarantined={result.items_quarantined} "

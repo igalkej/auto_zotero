@@ -55,13 +55,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal
 
+import httpx
 from pydantic import BaseModel, Field, ValidationError
 from rapidfuzz import fuzz
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
+from zotai.api.doaj import DOAJClient, _doi_from_doaj_record, map_doaj_to_zotero
 from zotai.api.openai_client import BudgetExceededError, OpenAIClient
 from zotai.api.openalex import OpenAlexClient
+from zotai.api.scielo import (
+    SciELoClient,
+    _doi_from_scielo_record,
+    map_scielo_to_zotero,
+)
 from zotai.api.semantic_scholar import SemanticScholarClient
 from zotai.api.zotero import ZoteroClient
 from zotai.config import Settings
@@ -135,10 +142,14 @@ _CSV_COLUMNS: Final[tuple[str, ...]] = (
     "error",
 )
 
-EnrichSubstage = Literal["04a", "04b", "04c", "04d", "04e", "all"]
+EnrichSubstage = Literal[
+    "04a", "04b", "04bs", "04bd", "04c", "04d", "04e", "all"
+]
 EnrichStatus = Literal[
     "enriched_04a",
     "enriched_04b",
+    "enriched_04bs",
+    "enriched_04bd",
     "enriched_04c",
     "enriched_04d",
     "quarantined_04e",
@@ -150,8 +161,19 @@ EnrichStatus = Literal[
     "dry_run",
 ]
 _ENRICHED_STATUSES: Final[frozenset[str]] = frozenset(
-    {"enriched_04a", "enriched_04b", "enriched_04c", "enriched_04d"}
+    {
+        "enriched_04a",
+        "enriched_04b",
+        "enriched_04bs",
+        "enriched_04bd",
+        "enriched_04c",
+        "enriched_04d",
+    }
 )
+# 04bs / 04bd resilience policy (ADR 018 + ADR 019): transient or
+# upstream-side HTTP errors fall through to the next substage as
+# ``no_progress`` rather than failing the item outright.
+_LATAM_TRANSIENT_STATUSES: Final[frozenset[int]] = frozenset({403, 429, 502, 503})
 
 
 # ─── Identifier regexes (shared patterns reused from Stage 01 classifier) ──
@@ -204,6 +226,8 @@ class EnrichResult:
     items_failed: int
     items_enriched_04a: int
     items_enriched_04b: int
+    items_enriched_04bs: int
+    items_enriched_04bd: int
     items_enriched_04c: int
     items_enriched_04d: int
     items_quarantined: int
@@ -766,6 +790,435 @@ async def _enrich_04b_one(
             zotero_item_key_before=item.zotero_item_key,
             zotero_item_key_after=parent_key,
             substage_resolved="04b",
+            new_doi=doi,
+            status=status,
+            error=None,
+        ),
+        payload,
+    )
+
+
+# ─── 04bs (SciELO via Crossref Member 530, ADR 018 + ADR 019) ────────────
+
+
+def _picked_via_crossref_title(
+    title: str, candidates: list[dict[str, Any]]
+) -> tuple[dict[str, Any], float] | None:
+    """Apply the cascade's fuzzy threshold against Crossref's list-shaped title.
+
+    Crossref returns ``record["title"]`` as a list of strings (typically
+    one element). :func:`_pick_best_fuzzy_match` skips non-string titles,
+    so we project to a flat ``{"title": str, "_record": dict}`` shape
+    first.
+    """
+    flat: list[dict[str, Any]] = []
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        title_list = cand.get("title")
+        if not isinstance(title_list, list) or not title_list:
+            continue
+        flat_title = title_list[0]
+        if not isinstance(flat_title, str) or not flat_title.strip():
+            continue
+        flat.append({"title": flat_title, "_record": cand})
+    picked = _pick_best_fuzzy_match(title, flat, title_key="title")
+    if picked is None:
+        return None
+    best_flat, score = picked
+    return best_flat["_record"], score
+
+
+async def _enrich_04bs_one(
+    item: Item,
+    *,
+    staging_folder: Path,
+    zotero_client: ZoteroClient,
+    scielo_client: SciELoClient,
+    dry_run: bool,
+) -> tuple[EnrichRow, dict[str, Any] | None]:
+    """04bs for a single item: title → SciELO (Crossref member:530) → fuzzy → reparent.
+
+    On transient HTTP failure (403/429/502/503 — see ADR 018 §Resilience
+    policy) the substage returns ``no_progress`` so the cascade flows to
+    04bd; only genuine bugs land as ``failed``.
+    """
+    pdf_path = _pdf_for_text(item, staging_folder)
+    if not pdf_path.exists():
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="failed",
+                error=f"pdf_missing:{pdf_path}",
+            ),
+            None,
+        )
+
+    try:
+        title = extract_probable_title(pdf_path)
+    except Exception as exc:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="failed",
+                error=f"pdf_extract:{type(exc).__name__}:{exc}",
+            ),
+            None,
+        )
+
+    if title is None:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="skipped_generic_title",
+                error=None,
+            ),
+            None,
+        )
+
+    try:
+        candidates = await scielo_client.search_articles(title)
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        if status_code in _LATAM_TRANSIENT_STATUSES:
+            log.warning(
+                "stage_04bs.scielo_unavailable", title=title, status=status_code
+            )
+            return (
+                EnrichRow(
+                    sha256=item.id,
+                    source_path=item.source_path,
+                    zotero_item_key_before=item.zotero_item_key,
+                    zotero_item_key_after=None,
+                    substage_resolved=None,
+                    new_doi=None,
+                    status="no_progress",
+                    error=f"scielo_unavailable:{status_code}",
+                ),
+                None,
+            )
+        log.warning("stage_04bs.scielo_error", title=title, error=str(exc))
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="failed",
+                error=f"scielo_error:{type(exc).__name__}:{exc}",
+            ),
+            None,
+        )
+    except Exception as exc:
+        log.warning("stage_04bs.scielo_error", title=title, error=str(exc))
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="failed",
+                error=f"scielo_error:{type(exc).__name__}:{exc}",
+            ),
+            None,
+        )
+
+    picked = _picked_via_crossref_title(title, candidates)
+    if picked is None:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="no_progress",
+                error=None,
+            ),
+            None,
+        )
+    best, _score = picked
+
+    payload = map_scielo_to_zotero(best)
+    if payload is None:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="no_progress",
+                error="quality_gate_failed",
+            ),
+            None,
+        )
+
+    doi = _doi_from_scielo_record(best)
+    parent_key, error = await _create_parent_and_reparent(
+        item,
+        payload,
+        doi=doi,
+        zotero_client=zotero_client,
+        dry_run=dry_run,
+    )
+    if error is not None or parent_key is None:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=doi,
+                status="failed",
+                error=error,
+            ),
+            None,
+        )
+
+    status: EnrichStatus = "dry_run" if dry_run else "enriched_04bs"
+    return (
+        EnrichRow(
+            sha256=item.id,
+            source_path=item.source_path,
+            zotero_item_key_before=item.zotero_item_key,
+            zotero_item_key_after=parent_key,
+            substage_resolved="04bs",
+            new_doi=doi,
+            status=status,
+            error=None,
+        ),
+        payload,
+    )
+
+
+# ─── 04bd (DOAJ, ADR 018) ─────────────────────────────────────────────────
+
+
+def _picked_via_bibjson_title(
+    title: str, candidates: list[dict[str, Any]]
+) -> tuple[dict[str, Any], float] | None:
+    """Apply the cascade's fuzzy threshold against DOAJ's nested title field.
+
+    DOAJ records carry the title at ``record["bibjson"]["title"]`` rather
+    than ``record["title"]`` — :func:`_pick_best_fuzzy_match` doesn't
+    follow nested keys, so we project to a flat shape first.
+    """
+    flat: list[dict[str, Any]] = []
+    for cand in candidates:
+        bib = cand.get("bibjson") if isinstance(cand, dict) else None
+        if not isinstance(bib, dict):
+            continue
+        flat_title = bib.get("title")
+        if not isinstance(flat_title, str) or not flat_title.strip():
+            continue
+        flat.append({"title": flat_title, "_record": cand})
+    picked = _pick_best_fuzzy_match(title, flat, title_key="title")
+    if picked is None:
+        return None
+    best_flat, score = picked
+    return best_flat["_record"], score
+
+
+async def _enrich_04bd_one(
+    item: Item,
+    *,
+    staging_folder: Path,
+    zotero_client: ZoteroClient,
+    doaj_client: DOAJClient,
+    dry_run: bool,
+) -> tuple[EnrichRow, dict[str, Any] | None]:
+    """04bd for a single item: title → DOAJ search → fuzzy match → reparent.
+
+    Same resilience policy as 04bs: HTTP 403/429/502/503 →
+    ``no_progress`` (cascade falls through to 04c); other exceptions
+    → ``failed``.
+    """
+    pdf_path = _pdf_for_text(item, staging_folder)
+    if not pdf_path.exists():
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="failed",
+                error=f"pdf_missing:{pdf_path}",
+            ),
+            None,
+        )
+
+    try:
+        title = extract_probable_title(pdf_path)
+    except Exception as exc:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="failed",
+                error=f"pdf_extract:{type(exc).__name__}:{exc}",
+            ),
+            None,
+        )
+
+    if title is None:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="skipped_generic_title",
+                error=None,
+            ),
+            None,
+        )
+
+    try:
+        candidates = await doaj_client.search_articles(title)
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        if status_code in _LATAM_TRANSIENT_STATUSES:
+            log.warning(
+                "stage_04bd.doaj_unavailable", title=title, status=status_code
+            )
+            return (
+                EnrichRow(
+                    sha256=item.id,
+                    source_path=item.source_path,
+                    zotero_item_key_before=item.zotero_item_key,
+                    zotero_item_key_after=None,
+                    substage_resolved=None,
+                    new_doi=None,
+                    status="no_progress",
+                    error=f"doaj_unavailable:{status_code}",
+                ),
+                None,
+            )
+        log.warning("stage_04bd.doaj_error", title=title, error=str(exc))
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="failed",
+                error=f"doaj_error:{type(exc).__name__}:{exc}",
+            ),
+            None,
+        )
+    except Exception as exc:
+        log.warning("stage_04bd.doaj_error", title=title, error=str(exc))
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="failed",
+                error=f"doaj_error:{type(exc).__name__}:{exc}",
+            ),
+            None,
+        )
+
+    picked = _picked_via_bibjson_title(title, candidates)
+    if picked is None:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="no_progress",
+                error=None,
+            ),
+            None,
+        )
+    best, _score = picked
+
+    payload = map_doaj_to_zotero(best)
+    if payload is None:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=None,
+                status="no_progress",
+                error="quality_gate_failed",
+            ),
+            None,
+        )
+
+    doi = _doi_from_doaj_record(best)
+    parent_key, error = await _create_parent_and_reparent(
+        item,
+        payload,
+        doi=doi,
+        zotero_client=zotero_client,
+        dry_run=dry_run,
+    )
+    if error is not None or parent_key is None:
+        return (
+            EnrichRow(
+                sha256=item.id,
+                source_path=item.source_path,
+                zotero_item_key_before=item.zotero_item_key,
+                zotero_item_key_after=None,
+                substage_resolved=None,
+                new_doi=doi,
+                status="failed",
+                error=error,
+            ),
+            None,
+        )
+
+    status: EnrichStatus = "dry_run" if dry_run else "enriched_04bd"
+    return (
+        EnrichRow(
+            sha256=item.id,
+            source_path=item.source_path,
+            zotero_item_key_before=item.zotero_item_key,
+            zotero_item_key_after=parent_key,
+            substage_resolved="04bd",
             new_doi=doi,
             status=status,
             error=None,
@@ -1380,6 +1833,8 @@ def run_enrich(
     engine: Engine | None = None,
     zotero_client: ZoteroClient | None = None,
     openalex_client: OpenAlexClient | None = None,
+    scielo_client: SciELoClient | None = None,
+    doaj_client: DOAJClient | None = None,
     semantic_scholar_client: SemanticScholarClient | None = None,
     openai_client: OpenAIClient | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -1389,12 +1844,16 @@ def run_enrich(
 
     ``04a`` — identifier extraction + OpenAlex DOI retry.
     ``04b`` — title fuzzy match against OpenAlex.
+    ``04bs`` — title fuzzy match against SciELO via Crossref Member 530
+    (ADR 018 + ADR 019). Default ON; opt-out via ``S1_ENABLE_SCIELO=false``.
+    ``04bd`` — title fuzzy match against DOAJ (ADR 018). Default ON;
+    opt-out via ``S1_ENABLE_DOAJ=false``.
     ``04c`` — title fuzzy match against Semantic Scholar.
     ``04d`` — LLM (``gpt-4o-mini``) extraction with budget enforcement
     (``MAX_COST_USD_STAGE_04``, overridable via ``max_cost``).
     ``04e`` — Quarantine: tag ``needs-manual-review`` + move to the
     Quarantine collection + append to ``quarantine_report.csv``.
-    ``all`` — per-item cascade 04a → 04b → 04c → 04d → 04e.
+    ``all`` — per-item cascade 04a → 04b → 04bs → 04bd → 04c → 04d → 04e.
 
     Once 04d's budget is exhausted during an ``all`` or ``04d`` run, the
     remaining items route directly to 04e without retrying the LLM.
@@ -1408,6 +1867,8 @@ def run_enrich(
             engine=engine,
             zotero_client=zotero_client,
             openalex_client=openalex_client,
+            scielo_client=scielo_client,
+            doaj_client=doaj_client,
             semantic_scholar_client=semantic_scholar_client,
             openai_client=openai_client,
             sleep=sleep,
@@ -1425,6 +1886,8 @@ async def _run_enrich_async(
     engine: Engine | None,
     zotero_client: ZoteroClient | None,
     openalex_client: OpenAlexClient | None,
+    scielo_client: SciELoClient | None,
+    doaj_client: DOAJClient | None,
     semantic_scholar_client: SemanticScholarClient | None,
     openai_client: OpenAIClient | None,
     sleep: Callable[[float], Awaitable[None]],
@@ -1448,9 +1911,30 @@ async def _run_enrich_async(
     if openalex_client is None:
         email = settings.behavior.user_email or None
         openalex_client = OpenAlexClient(user_email=email)
+    # 04bs / 04bd are opt-out-able (ADR 018 + ADR 019). Build only when
+    # the corresponding flag is True; the cascade short-circuits a
+    # ``None`` client cleanly. Explicit substage selection of a disabled
+    # source is a config error and raises StageAbortedError below.
+    if scielo_client is None and settings.behavior.s1_enable_scielo:
+        scielo_email = settings.behavior.user_email or None
+        scielo_client = SciELoClient(user_email=scielo_email)
+    if doaj_client is None and settings.behavior.s1_enable_doaj:
+        doaj_email = settings.behavior.user_email or None
+        doaj_client = DOAJClient(user_email=doaj_email)
     if semantic_scholar_client is None:
         ss_key = settings.semantic_scholar.api_key.get_secret_value() or None
         semantic_scholar_client = SemanticScholarClient(api_key=ss_key)
+
+    if substage == "04bs" and scielo_client is None:
+        raise StageAbortedError(
+            "Substage 04bs requires S1_ENABLE_SCIELO=true. Set it in .env "
+            "or pass scielo_client explicitly."
+        )
+    if substage == "04bd" and doaj_client is None:
+        raise StageAbortedError(
+            "Substage 04bd requires S1_ENABLE_DOAJ=true. Set it in .env "
+            "or pass doaj_client explicitly."
+        )
 
     # 04d / "all" need the OpenAI client + a budget. Build lazily so the
     # free substages don't require ``OPENAI_API_KEY``.
@@ -1526,6 +2010,36 @@ async def _run_enrich_async(
             return row_b, None, row_b.error
         last_error = row_b.error or last_error
 
+        # 04bs (SciELO via Crossref Member 530 — ADR 018 + ADR 019)
+        if scielo_client is not None:
+            row_bs, mapped_bs = await _enrich_04bs_one(
+                item,
+                staging_folder=staging_folder,
+                zotero_client=zotero_client,
+                scielo_client=scielo_client,
+                dry_run=dry_run,
+            )
+            if row_bs.status in _ENRICHED_STATUSES or row_bs.status == "dry_run":
+                return row_bs, mapped_bs, None
+            if row_bs.status == "failed":
+                return row_bs, None, row_bs.error
+            last_error = row_bs.error or last_error
+
+        # 04bd (DOAJ — ADR 018)
+        if doaj_client is not None:
+            row_bd, mapped_bd = await _enrich_04bd_one(
+                item,
+                staging_folder=staging_folder,
+                zotero_client=zotero_client,
+                doaj_client=doaj_client,
+                dry_run=dry_run,
+            )
+            if row_bd.status in _ENRICHED_STATUSES or row_bd.status == "dry_run":
+                return row_bd, mapped_bd, None
+            if row_bd.status == "failed":
+                return row_bd, None, row_bd.error
+            last_error = row_bd.error or last_error
+
         # 04c
         row_c, mapped_c = await _enrich_04c_one(
             item,
@@ -1598,6 +2112,24 @@ async def _run_enrich_async(
                         staging_folder=staging_folder,
                         zotero_client=zotero_client,
                         openalex_client=openalex_client,
+                        dry_run=dry_run,
+                    )
+                elif substage == "04bs":
+                    assert scielo_client is not None  # gated by the StageAbortedError check
+                    row, mapped = await _enrich_04bs_one(
+                        item,
+                        staging_folder=staging_folder,
+                        zotero_client=zotero_client,
+                        scielo_client=scielo_client,
+                        dry_run=dry_run,
+                    )
+                elif substage == "04bd":
+                    assert doaj_client is not None  # gated by the StageAbortedError check
+                    row, mapped = await _enrich_04bd_one(
+                        item,
+                        staging_folder=staging_folder,
+                        zotero_client=zotero_client,
+                        doaj_client=doaj_client,
                         dry_run=dry_run,
                     )
                 elif substage == "04c":
@@ -1723,6 +2255,8 @@ async def _run_enrich_async(
         items_failed=items_failed,
         items_enriched_04a=sum(1 for r in rows if r.status == "enriched_04a"),
         items_enriched_04b=sum(1 for r in rows if r.status == "enriched_04b"),
+        items_enriched_04bs=sum(1 for r in rows if r.status == "enriched_04bs"),
+        items_enriched_04bd=sum(1 for r in rows if r.status == "enriched_04bd"),
         items_enriched_04c=sum(1 for r in rows if r.status == "enriched_04c"),
         items_enriched_04d=sum(1 for r in rows if r.status == "enriched_04d"),
         items_quarantined=sum(1 for r in rows if r.status == "quarantined_04e"),
@@ -1741,6 +2275,8 @@ async def _run_enrich_async(
         failed=result.items_failed,
         enriched_04a=result.items_enriched_04a,
         enriched_04b=result.items_enriched_04b,
+        enriched_04bs=result.items_enriched_04bs,
+        enriched_04bd=result.items_enriched_04bd,
         enriched_04c=result.items_enriched_04c,
         enriched_04d=result.items_enriched_04d,
         quarantined=result.items_quarantined,
@@ -1762,3 +2298,6 @@ __all__ = [
     "map_semantic_scholar_to_zotero",
     "run_enrich",
 ]
+# Note: ``map_scielo_to_zotero`` and ``map_doaj_to_zotero`` live with their
+# clients in ``zotai.api.scielo`` and ``zotai.api.doaj`` respectively (per
+# ADR 018 §"Implementation artefacts" §1 and ADR 019 §Decision §1).
