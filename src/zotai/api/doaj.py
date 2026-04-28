@@ -149,6 +149,8 @@ def _split_doaj_name(name: str) -> tuple[str, str]:
     author shapes consistent.
     """
     name = name.strip()
+    if not name:
+        return "", ""
     if "," in name:
         last, _, first = name.partition(",")
         return first.strip(), last.strip()
