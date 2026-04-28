@@ -83,7 +83,7 @@ Cada una con ADR correspondiente en `docs/decisions/`.
 | 004 | OpenAI text-embedding-3-large | Corpus mix es/en requiere embedder multilingual. Default de zotero-mcp (MiniLM) degrada 20+ puntos en queries en español. |
 | 005 | gpt-4o-mini para tagging/extracción | Calidad suficiente, $0.00042/paper. $2 para toda la biblioteca. |
 | 006 | zotero-mcp (54yyyu) para S3 | Existe, estable, cubre los 3 modos out-of-the-box. Build propio no justificado. |
-| 007 | FastAPI + HTMX para dashboard S2 | HTMX evita SPA, renderizado server-side, más simple de mantener. Un único investigador hace cambios. |
+| 007 | FastAPI + HTMX para dashboard S2 _(pendiente — ver [#12](https://github.com/igalkej/auto_zotero/issues/12))_ | HTMX evita SPA, renderizado server-side, más simple de mantener. Un único investigador hace cambios. ADR escrito como entregable de S2 Sprint 1. |
 | 008 | Cuarentena en S1 en vez de "todo o nada" | Resuelve tensión completitud vs calidad. Lo dudoso queda accesible pero marcado. |
 | 009 | zotero-mcp usado por S3 **pero no por S1/S2** | S1/S2 usan la API de Zotero directa (pyzotero). MCP es para consumo conversacional. **Parcialmente superseded por ADR 015** en lo que hace al ChromaDB: S2 ahora también escribe directo al índice (sin pasar por `zotero-mcp update-db`), aunque sigue usando pyzotero para Zotero. |
 | 010 | Ruta A usa OpenAlex para DOI → metadata (no el translator de Zotero) | Translator de Zotero es API no pública / frágil entre versiones. OpenAlex cubre >98% DOIs académicos con API estable. |

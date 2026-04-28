@@ -68,8 +68,13 @@ Ver `docs/plan_01_subsystem1.md` §3.1 para el detalle del clasificador.
 | Subsistema | Estado | Plan |
 |---|---|---|
 | S1 – Retroactive | 🟢 Funcional end-to-end (Stages 01-06 + `run-all` + `status` + Docker + setup docs). Taxonomía pendiente de customizar por cada investigador antes de aplicar tags reales. | `docs/plan_01_subsystem1.md` |
-| S3 – MCP access | 🟡 Spec, pendiente implementación ([#11](https://github.com/igalkej/auto_zotero/issues/11)) | `docs/plan_03_subsystem3.md` |
 | S2 – Prospective | 🟡 Spec, pendiente implementación ([#12](https://github.com/igalkej/auto_zotero/issues/12)–[#15](https://github.com/igalkej/auto_zotero/issues/15)) | `docs/plan_02_subsystem2.md` |
+| S3 – MCP access | 🟡 Spec, pendiente implementación ([#11](https://github.com/igalkej/auto_zotero/issues/11)) | `docs/plan_03_subsystem3.md` |
+
+Orden de implementación (plan_00 §4): **S1 → S2 → S3**. S2 es owner del
+índice de embeddings (ADR 015); S3 es lector puro y arranca a darle
+valor al modo descubrimiento una vez que el primer `zotai s2
+backfill-index` haya corrido.
 
 ---
 
