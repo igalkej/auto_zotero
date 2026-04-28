@@ -12,7 +12,7 @@ mapper + two small parsing helpers. Coverage matches:
 - ``_doi_from_doaj_record``: identifier list parsing — DOI vs other
   types, missing list, malformed entries.
 - ``_split_doaj_name``: comma form, Western order, single token,
-  whitespace handling.
+  empty / whitespace-only input, leading/trailing whitespace.
 - ``_date_from_doaj``: year as str / int, with / without month, invalid
   month, missing year.
 
@@ -228,6 +228,18 @@ def test_split_doaj_name_western_order() -> None:
 
 def test_split_doaj_name_single_token() -> None:
     assert _split_doaj_name("Plato") == ("", "Plato")
+
+
+def test_split_doaj_name_empty_string_returns_empty_pair() -> None:
+    # The caller in ``map_doaj_to_zotero`` filters blanks before
+    # invoking, but the helper still must not raise on an empty string —
+    # its contract should match
+    # ``zotai.api.zotero_queries.split_name``.
+    assert _split_doaj_name("") == ("", "")
+
+
+def test_split_doaj_name_whitespace_only_returns_empty_pair() -> None:
+    assert _split_doaj_name("   ") == ("", "")
 
 
 def test_split_doaj_name_strips_whitespace() -> None:
