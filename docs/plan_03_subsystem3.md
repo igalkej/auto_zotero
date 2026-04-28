@@ -253,9 +253,22 @@ Bajo **ADR 015**, la dirección de la integración se invierte respecto a versio
 
 ## 11. Orden de ejecución en contexto del proyecto
 
-Este subsistema se implementa **después del S1**, **antes del S2**.
+Bajo **ADR 015** el orden de valor entregado es **S1 → S2 → S3** (ver
+plan_00 §4). S2 es owner del índice de embeddings; S3 (`zotero-mcp
+serve`) es lector puro.
 
 Razones:
-- Requiere biblioteca poblada (S1).
-- Es el primer punto donde el usuario experimenta valor del producto (cierra MVP).
-- Su ChromaDB es usada por el S2, por lo que debe estar operativo antes de que el S2 dependa de ella.
+- Requiere biblioteca Zotero poblada (S1).
+- Requiere ChromaDB poblada — la primer vez con `zotai s2 backfill-index`
+  (S2 Sprint 1, issue #12). Antes de eso `zotero_semantic_search` retorna
+  vacío. El setup de Claude Desktop / `zotero-mcp` funciona igual, sólo
+  el modo descubrimiento queda degradado.
+- Setup ligero (~0.5d, mayormente docs y config) — el código propio del
+  subsistema es nulo, la complejidad está en `zotero-mcp` upstream.
+
+**Paralelización**. Las issues #11 (S3 docs) y #12 (S2 Sprint 1) no
+tienen dependencia técnica entre sí: S3 sólo necesita la biblioteca de
+S1, y S2 no necesita el MCP server configurado. Si conviene
+operativamente, los entregables de S3 (docs + scripts) pueden
+empaquetarse en paralelo con S2 Sprint 1; el orden lineal **S1 → S2 →
+S3** sigue siendo el orden de valor entregado al usuario.
