@@ -71,25 +71,18 @@ from zotai.api.scielo import (
 )
 from zotai.api.semantic_scholar import SemanticScholarClient
 from zotai.api.zotero import ZoteroClient
+from zotai.api.zotero_queries import (
+    existing_has_pdf_attachment,
+    find_existing_doi,
+    split_name,
+)
 from zotai.config import Settings
 from zotai.s1.handler import StageAbortedError
-from zotai.s1.stage_03_import import (
-    _existing_has_pdf_attachment,
-    _find_existing_doi,
-    _split_name,
-    map_openalex_to_zotero,
-)
+from zotai.s1.stage_03_import import map_openalex_to_zotero
 from zotai.state import Item, Run, init_s1, make_s1_engine
 from zotai.utils.fs import ensure_dir
 from zotai.utils.logging import bind, get_logger
 from zotai.utils.pdf import extract_probable_title, extract_text_pages
-
-# TODO(refactor): _find_existing_doi, _existing_has_pdf_attachment, and
-# _split_name are now reused across Stage 03 and every 04 substage via
-# _create_parent_and_reparent. A follow-up chore PR should promote them
-# to `zotai.api.zotero_queries` (or similar) and drop the noqa imports
-# below. Deferred — trivial, not worth mixing with Stage 04 feature
-# work; pick up when Stage 05 lands (it will want the same helpers).
 
 log = get_logger(__name__)
 
@@ -352,7 +345,7 @@ def map_semantic_scholar_to_zotero(
         name = (entry.get("name") or "").strip()
         if not name:
             continue
-        first, last = _split_name(name)
+        first, last = split_name(name)
         creators.append(
             {"creatorType": "author", "firstName": first, "lastName": last}
         )
@@ -459,10 +452,10 @@ async def _create_parent_and_reparent(
 
     existing_parent: str | None = None
     if doi:
-        existing_parent = _find_existing_doi(zotero_client, doi)
+        existing_parent = find_existing_doi(zotero_client, doi)
 
     if existing_parent is not None:
-        if _existing_has_pdf_attachment(zotero_client, existing_parent):
+        if existing_has_pdf_attachment(zotero_client, existing_parent):
             log.info(
                 "stage_04.dedup.existing_item_with_pdf",
                 doi=doi,

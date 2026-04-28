@@ -143,10 +143,10 @@ def _split_doaj_name(name: str) -> tuple[str, str]:
     """Split a DOAJ author ``name`` into ``(firstName, lastName)``.
 
     DOAJ stores authors as a single ``name`` string, typically either
-    "Last, First" or "First Last". Mirrors the convention used by
-    :func:`zotai.s1.stage_03_import._split_name` so all substages keep
-    author shapes consistent. (Not imported from there to keep the
-    ``api/`` package free of ``s1/`` dependencies.)
+    "Last, First" or "First Last". The "Last, First" branch is unique
+    to DOAJ; the Western-order fallback mirrors
+    :func:`zotai.api.zotero_queries.split_name` so all substages keep
+    author shapes consistent.
     """
     name = name.strip()
     if "," in name:

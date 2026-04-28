@@ -66,6 +66,11 @@ from sqlmodel import Session, select
 
 from zotai.api.openalex import OpenAlexClient
 from zotai.api.zotero import ZoteroClient
+from zotai.api.zotero_queries import (
+    existing_has_pdf_attachment,
+    find_existing_doi,
+    split_name,
+)
 from zotai.config import Settings
 from zotai.s1.handler import StageAbortedError
 from zotai.state import Item, Run, init_s1, make_s1_engine
@@ -181,25 +186,6 @@ def _reconstruct_abstract(inverted: dict[str, list[int]] | None) -> str:
     return " ".join(word for _, word in positions)
 
 
-def _split_name(display_name: str) -> tuple[str, str]:
-    """Split ``"Jane A. Doe"`` into ``("Jane A.", "Doe")``.
-
-    Heuristic: the last whitespace-separated token is the surname. Works
-    well for Western name order; misclassifies some Spanish compound
-    surnames (``"Gabriel García Márquez"`` → ``("Gabriel García", "Márquez")``)
-    but OpenAlex itself only stores display names, so we cannot do better
-    without more data. Stage 04 LLM extraction has a chance to correct
-    this when a document falls through.
-    """
-    cleaned = display_name.strip()
-    if not cleaned:
-        return "", ""
-    parts = cleaned.split()
-    if len(parts) == 1:
-        return "", parts[0]
-    return " ".join(parts[:-1]), parts[-1]
-
-
 def _strip_doi_url(raw: str | None) -> str | None:
     """OpenAlex returns DOIs as URLs; Zotero wants the bare identifier."""
     if not raw:
@@ -228,7 +214,7 @@ def map_openalex_to_zotero(work: dict[str, Any]) -> dict[str, Any] | None:
         display_name = (author.get("display_name") or "").strip()
         if not display_name:
             continue
-        first, last = _split_name(display_name)
+        first, last = split_name(display_name)
         creators.append(
             {"creatorType": "author", "firstName": first, "lastName": last}
         )
@@ -283,43 +269,6 @@ def _check_connectivity(zotero_client: ZoteroClient) -> None:
             f"open; web API requires ZOTERO_API_KEY / ZOTERO_LIBRARY_ID. "
             f"Underlying error: {type(exc).__name__}: {exc}"
         ) from exc
-
-
-def _find_existing_doi(
-    zotero_client: ZoteroClient, doi: str
-) -> str | None:
-    """Return the item_key of an existing Zotero item with this DOI, or None."""
-    results = zotero_client.items(q=doi, qmode="everything", limit=25)
-    lowered = doi.lower()
-    for result in results:
-        data = result.get("data") or {}
-        existing_doi = (data.get("DOI") or "").lower()
-        if existing_doi == lowered:
-            key = result.get("key") or data.get("key")
-            if isinstance(key, str) and key:
-                return key
-    return None
-
-
-def _existing_has_pdf_attachment(
-    zotero_client: ZoteroClient, item_key: str
-) -> bool:
-    """Return True iff the item already has at least one PDF attachment.
-
-    Used on the dedup path (ADR 014): when Stage 03 finds that the DOI
-    is already in the user's Zotero library, we skip attaching our PDF
-    if an existing PDF child is there — the user already had the paper
-    and its own copy. If the parent has *no* PDF (metadata-only import
-    from a prior session), we still attach.
-    """
-    for child in zotero_client.children(item_key):
-        data = child.get("data") or {}
-        if data.get("itemType") != "attachment":
-            continue
-        content_type = (data.get("contentType") or "").lower()
-        if content_type.startswith("application/pdf"):
-            return True
-    return False
 
 
 def _pick_attach_path(item: Item, staging_folder: Path) -> Path:
@@ -382,7 +331,7 @@ async def _import_one(
             existing_key = (
                 None
                 if dry_run
-                else _find_existing_doi(zotero_client, doi_value)
+                else find_existing_doi(zotero_client, doi_value)
             )
             if existing_key:
                 # ADR 014: if the existing Zotero item already carries a
@@ -392,7 +341,7 @@ async def _import_one(
                 if dry_run:
                     dedup_status: ImportStatus = "dry_run"
                 else:
-                    already_has_pdf = _existing_has_pdf_attachment(
+                    already_has_pdf = existing_has_pdf_attachment(
                         zotero_client, existing_key
                     )
                     if already_has_pdf:
