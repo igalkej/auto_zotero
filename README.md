@@ -50,6 +50,18 @@ Si querés colecciones por proyecto de investigación (p.ej. "Tesis doctoral", "
 
 Definidas en `config/taxonomy.yaml`; taxonomía completa y reglas en `docs/plan_taxonomy.md`. El archivo hoy viene con plantilla de economía / LATAM que el investigador debe customizar antes de correr Etapa 05 (tagging).
 
+### Tags reservados por el sistema (S2, ADR 022)
+
+Adicionalmente, S2 aplica hasta tres tags reservados ortogonales a TEMA/METODO. Son útiles como filtros en Zotero:
+
+| Tag | Significado | Permanencia |
+|---|---|---|
+| `needs-pdf` | Push intentó cascade de PDF y falló transitoriamente; espera retry. | Transitorio (lo remueve el sprint 3 cuando un retry exitoso aterrice). |
+| `metadata-only` | Item aceptado deliberadamente sin expectativa de PDF (paywalled estable o classic ausente). | Permanente (el usuario lo puede remover manualmente). |
+| `discovered-via-refs` | Origen: bandeja `/classics` (reference mining), no journal RSS. | Permanente. |
+
+`needs-pdf` y `metadata-only` son mutuamente excluyentes. `discovered-via-refs` es ortogonal: un classic ausente sin PDF queda con `discovered-via-refs` + `metadata-only`. Detalle completo en `docs/decisions/022-metadata-only-push-first-class.md`.
+
 ### Campos nativos de Zotero (no duplicar como tags)
 - `Place` → país / región del estudio.
 - `Item Type` → `journalArticle`, `book`, `thesis`, `report`, `preprint`, `conferencePaper`, etc.
@@ -68,13 +80,15 @@ Ver `docs/plan_01_subsystem1.md` §3.1 para el detalle del clasificador.
 | Subsistema | Estado | Plan |
 |---|---|---|
 | S1 – Retroactive | 🟢 Funcional end-to-end (Stages 01-06 + `run-all` + `status` + Docker + setup docs). Taxonomía pendiente de customizar por cada investigador antes de aplicar tags reales. | `docs/plan_01_subsystem1.md` |
-| S2 – Prospective | 🟡 Spec, pendiente implementación ([#12](https://github.com/igalkej/auto_zotero/issues/12)–[#15](https://github.com/igalkej/auto_zotero/issues/15)) | `docs/plan_02_subsystem2.md` |
+| S2 – Prospective | 🟡 Spec cerrada (Sprints 1-4: [#12](https://github.com/igalkej/auto_zotero/issues/12)–[#15](https://github.com/igalkej/auto_zotero/issues/15)) + Sprint 5 nuevo (citation graph + bandeja `/classics` + push metadata-only; ADRs 020/021/022). Implementación pendiente. | `docs/plan_02_subsystem2.md` |
 | S3 – MCP access | 🟡 Spec, pendiente implementación ([#11](https://github.com/igalkej/auto_zotero/issues/11)) | `docs/plan_03_subsystem3.md` |
 
-Orden de implementación (plan_00 §4): **S1 → S2 → S3**. S2 es owner del
-índice de embeddings (ADR 015); S3 es lector puro y arranca a darle
-valor al modo descubrimiento una vez que el primer `zotai s2
-backfill-index` haya corrido.
+Orden de implementación (plan_00 §4): **S1 → S2 → S3**. S2 es owner de
+**dos índices secundarios** sobre la biblioteca: el índice de
+embeddings de ChromaDB (ADR 015) y el citation graph en
+`candidates.db` (ADR 020 + 021). S3 es lector puro de ChromaDB y
+arranca a darle valor al modo descubrimiento una vez que el primer
+`zotai s2 backfill-index` haya corrido.
 
 ---
 

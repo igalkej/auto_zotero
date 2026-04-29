@@ -53,6 +53,8 @@ Objetivo de más alto nivel: **multiplicar por 3-5x la cantidad de consultas bib
 
 **Comunicación entre subsistemas**: solo a través de Zotero. No hay DB compartida ni API interna. Esto es deliberado: loose coupling, Zotero ya resuelve persistencia, permisos, y sync.
 
+**Estado derivado owned por S2**: aunque la fuente de verdad es Zotero, S2 mantiene **dos índices secundarios** sobre el corpus para responder eficientemente sus tareas de scoring y discovery — (a) **ChromaDB** con embeddings de cada item (ADR 015), y (b) **citation graph** en `candidates.db` con tablas `Reference` + `ExternalPaper` (ADR 020). Ambos se mantienen por reconciliación por diff en cada ciclo del worker; ambos son auto-curativos (si se borran, el siguiente ciclo los repuebla); ninguno es DB compartida con S1 — son strict downstream de Zotero. S3 lee ChromaDB; el citation graph no se expone a S3.
+
 ---
 
 ## 4. Orden de implementación
@@ -96,6 +98,9 @@ Cada una con ADR correspondiente en `docs/decisions/`.
 | 017 | Hybrid retrieval (BM25 + dense) para `score_queries` de S2 | Queries persistentes son cortas (3-7 tokens); dense puro underperforma por 5-15 recall points. SQLite FTS5 built-in provee BM25 sin nueva dep. α=0.4 literatura default; calibrar con ADR sucesor post-datos. |
 | 018 | Stage 04 cascade: agregar substages 04bs (SciELO) + 04bd (DOAJ) entre 04b y 04c | Cierra el gap LATAM/open-access del cascade gratis para corpus CONICET. Default ON con opt-out via `S1_ENABLE_SCIELO`/`S1_ENABLE_DOAJ`. REDIB / RedALyC / La Referencia / ERIH PLUS / Scopus quedan fuera con justificación documentada. **Amended por ADR 019** — 04bs implementa via Crossref Member 530 porque `search.scielo.org` está cerrado a clientes anónimos. |
 | 019 | Substage 04bs implementa via Crossref Member 530 (no `search.scielo.org`) | El endpoint Solr público de SciELO devuelve 403 a httpx anónimo en toda variante; ArticleMeta sólo soporta lookup por SciELO PID. Member 530 es el ID Crossref de SciELO; el filter narrows el search space y mejora ranking top-5 LATAM-Spanish vs OpenAlex sin filtro. Amends ADR 018 §"Sources evaluated" SciELO row + §Decision §1 + §"Implementation artefacts" §1. |
+| 020 | **S2 owna el grafo de citas de la biblioteca** (tablas `Reference` + `ExternalPaper` en `candidates.db`) | Análogo a ADR 015 para embeddings. Habilita `score_refs` (4ta señal RRF) + bandeja `/classics` (discovery de papers altamente citados ausentes). Reconciliación por diff en step 0.5 del worker; comando explícito `zotai s2 backfill-references`. Owner S2 (no S1) preserva el contrato plan_00 §3 a costa de duplicar calls a OpenAlex (gratis). |
+| 021 | Cascade de captura de refs: OpenAlex → HTML scraping (OJS / SciELO / genérico) → PDF (opt-in) | Cubre el gap LATAM sin costo USD adicional. Tres parsers aislados en `src/zotai/api/refs_scrapers/`, fail-soft por nivel. PDF parsing detrás de flag `S2_REFS_PDF_PARSING_ENABLED`, default `false`, no implementado v1. Variables `S2_REFS_*` agregadas a `.env.example`. |
+| 022 | Items metadata-only como flujo de primera clase del push | Tres tags reservados ortogonales: `needs-pdf` transitorio (retry-able), `metadata-only` permanente (deliberado), `discovered-via-refs` por origen (bandeja /classics). Default por `source_kind`: RSS → push estándar; `reference_mining` → push metadata-only. Una sola vuelta de cascade silenciosa, sin loops contra Sci-Hub/LibGen. Habilita el flujo de aceptación de la bandeja /classics que introduce ADR 020. |
 
 ---
 

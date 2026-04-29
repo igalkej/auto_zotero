@@ -44,10 +44,12 @@ Mantener la biblioteca Zotero sincronizada con el estado del arte de los temas d
 ┌───────────────────────────────────────────────────────────────┐
 │ Worker (scheduled, corre c/ N horas)                          │
 │  ┌──────────────────────────────────────────────────────┐     │
-│  │ 0. Reconcile ChromaDB (add missing, remove orphans)  │     │
-│  │    Mantiene el invariante: todo item no-cuarentenado │     │
-│  │    en Zotero tiene entrada en ChromaDB. Ver ADR 015. │     │
-│  │ 1. Fetch RSS de journals configurados                │     │
+│  │ 0.   Reconcile ChromaDB (ADR 015 — embeddings)       │     │
+│  │ 0.5  Reconcile citation graph (ADR 020 — refs)       │     │
+│  │      Invariantes: todo item no-cuarentenado en       │     │
+│  │      Zotero tiene entrada en ChromaDB Y refs         │     │
+│  │      persistidas en Reference. Auto-curativos.       │     │
+│  │ 1.   Fetch RSS de journals configurados              │     │
 │  │ 2. Parsear, deduplicar vs candidatos ya vistos       │     │
 │  │ 3. Para cada nuevo candidato:                        │     │
 │  │    a. Enriquecer metadata (DOI → OpenAlex)           │     │
@@ -96,7 +98,8 @@ Mantener la biblioteca Zotero sincronizada con el estado del arte de los temas d
 ```python
 class Candidate(SQLModel, table=True):
     id: str = Field(primary_key=True)  # hash del DOI o URL
-    source_feed_id: str = Field(foreign_key="feed.id")
+    source_feed_id: Optional[str] = Field(foreign_key="feed.id", default=None)
+    source_kind: str = "rss"  # 'rss' | 'reference_mining' (ADR 020 §2.2)
     doi: Optional[str] = None
     title: str
     authors_json: str  # JSON list
@@ -106,10 +109,11 @@ class Candidate(SQLModel, table=True):
     url: Optional[str] = None
 
     # Scoring
-    score_tags: float = 0.0           # 0-1
+    score_tags: float = 0.0            # 0-1
     score_semantic: float = 0.0        # 0-1
     score_queries: float = 0.0         # 0-1
-    score_composite: float = 0.0       # 0-1
+    score_refs: float = 0.0            # 0-1 — overlap bibliográfico (ADR 020 §2.4)
+    score_composite: float = 0.0       # 0-1 — RRF sobre los cuatro (ADR 016)
     scoring_explanation: str  # JSON blob explicando por qué cada score
 
     # Triage
@@ -153,6 +157,35 @@ class TriageMetric(SQLModel, table=True):
     candidates_rejected: int
     candidates_deferred: int
     precision_observed: float  # accepted / (accepted + rejected)
+
+
+# ───── Citation graph (ADR 020) ─────
+
+class Reference(SQLModel, table=True):
+    """Una arista del grafo de citas: paper_X cita paper_Y."""
+    id: int = Field(primary_key=True)
+    citing_zotero_key: str  # 8 chars, FK lógica a Zotero, indexed
+    cited_doi: Optional[str] = None              # indexed
+    cited_openalex_id: Optional[str] = None
+    cited_text: Optional[str] = None             # cita libre cuando no hay DOI
+    source_api: str  # 'openalex' | 'ojs_html' | 'scielo_html' | 'generic_html' | 'pdf'
+    fetched_at: datetime
+
+
+class ExternalPaper(SQLModel, table=True):
+    """Cache de DOIs ausentes en Zotero pero citados por papers en él.
+
+    Habilita la bandeja /classics sin re-llamar a OpenAlex en cada render.
+    """
+    doi: str = Field(primary_key=True)
+    openalex_id: Optional[str] = None
+    title: str
+    authors_json: str
+    year: Optional[int] = None
+    venue: Optional[str] = None
+    abstract: Optional[str] = None
+    cited_by_count: int = 0   # global, no en mi corpus
+    last_seen_at: datetime
 ```
 
 **Nota — ChromaDB no está en `candidates.db`**. Bajo ADR 015, S2 también
@@ -173,6 +206,19 @@ sync vía triggers INSERT/UPDATE/DELETE sobre `Candidate`. Es la que
 responde la mitad BM25 del score híbrido en §7.3. Zero mantenimiento
 del usuario; los triggers se crean junto con el schema al
 `init_s2()`.
+
+**Nota — citation graph en `candidates.db`** (ADR 020). Las tablas
+`Reference` (aristas del grafo) y `ExternalPaper` (cache de DOIs
+ausentes en Zotero pero citados por papers en él) son el segundo
+índice secundario que S2 mantiene sobre el corpus, después de
+ChromaDB. S2 es owner; S1 no escribe; S3 no consume. Mantenido por
+reconciliación por diff en step 0.5 del worker (§9). Consumido por
+`score_refs` (§7.4) y por la bandeja `/classics` (§8.3). Captura de
+refs vía cascade ADR 021 (OpenAlex → HTML scraping → PDF opcional).
+Indexes:
+- `Reference(citing_zotero_key)` — overlap intra-corpus O(log n).
+- `Reference(cited_doi)` — frecuencia de cita global (ranking de
+  `/classics`) y "qué papers de mi corpus citan a X" O(log n).
 
 ---
 
@@ -287,17 +333,45 @@ END;
 
 `remove_diacritics 2` hace que "política" matchee "politica" — útil para corpus mixto es/en donde los acentos son inconsistentes.
 
-### 7.4 Score compuesto
+### 7.4 Score por refs (ADR 020)
 
-**Método default: Reciprocal Rank Fusion (RRF)** sobre los tres scores por criterio. Ver ADR 016 para el rationale completo — resumen: un promedio ponderado destruye señales ortogonales (un paper con `queries=0.9` pero `tags=0.1, semantic=0.1` se entierra bajo pesos arbitrarios); RRF es robusto a distribuciones distintas de cada criterio y favorece a quienes aparecen arriba en *cualquiera* de los tres.
+**Input**: candidate con `doi` (o `landing_url` si vino de RSS sin DOI confirmado).
+**Output**: `score_refs ∈ [0, 1]`.
+
+**Lógica**:
+1. Obtener `refs(c)` aplicando la cascade ADR 021 (OpenAlex → HTML scraping → PDF opcional). Para candidates RSS la cascade corre en el momento del scoring; para candidates de `/classics` (`source_kind='reference_mining'`) las refs ya están en `Reference` con `citing_zotero_key='cand:<id>'` o equivalente — reusar.
+2. Cargar `zotero_dois` del corpus (cacheado al ciclo del worker, ver §9).
+3. `score_refs(c) = |refs(c) ∩ zotero_dois| / |refs(c)|`, clippeado a `[0, 1]`.
+
+**Si `|refs(c)| = 0`** (cobertura combinada cero — OpenAlex devolvió vacío y la cascade HTML también): el score se **omite del RRF** (§7.5 / ADR 016) en lugar de penalizar. No podemos puntuar a falta de información; RRF integra naturalmente las tres señales restantes con la convención `rank = ∞ ⇒ contribution = 0`.
+
+**Por qué es ortogonal a tags / semantic / queries**:
+- Estructural, no falseable por palabras: un paper cita o no cita.
+- Captura "nueva aplicación de ideas viejas" (taxonomía distinta, bibliografía compartida) que `score_tags` se pierde.
+- Robusto en corpora donde abstract es genérico (humanidades, paywalled, LATAM): donde `score_semantic` degrada, `score_refs` mantiene señal estructural.
+- Ortogonal incluso a queries persistentes: una query de 3 tokens puede no matchear nada del title/abstract de un paper que sin embargo cita 6 anchors centrales del campo.
+
+**Coupling intra-corpus** (similitud entre dos papers de Zotero por refs compartidas) queda implícito en `Reference` y no se materializa como métrica separada en v1. Si más adelante se quiere usar para validación de tags o detección de duplicados temáticos, basta con queries SQL sobre la tabla.
+
+### 7.5 Score compuesto
+
+**Método default: Reciprocal Rank Fusion (RRF)** sobre los **cuatro** scores por criterio (`tags`, `semantic`, `queries`, `refs`). Ver ADR 016 para el rationale completo — resumen: un promedio ponderado destruye señales ortogonales (un paper con `queries=0.9` pero `tags=0.1, semantic=0.1, refs=0.1` se entierra bajo pesos arbitrarios); RRF es robusto a distribuciones distintas de cada criterio y favorece a quienes aparecen arriba en *cualquiera* de los cuatro. La cuarta señal (`score_refs`) entró en ADR 020 sin requerir cambios al ADR 016: un candidate sin refs disponibles se omite naturalmente del ranking de ese criterio (rank infinito ⇒ contribución cero).
 
 ```python
 # Reciprocal Rank Fusion (Cormack, Clarke, Büttcher 2009).
 # Lower rank = better; k absorbs the noise at the tail.
 def composite_score(candidates: list[Candidate], k: int = 60) -> None:
-    for criterion in ("tags", "semantic", "queries"):
+    for criterion in ("tags", "semantic", "queries", "refs"):
+        # Para `refs`: candidates con score_refs == 0 (porque |refs(c)| = 0)
+        # se excluyen del ranking de ese criterio para no pisar a los que sí
+        # tienen señal. ADR 020 §2.4.
+        eligible = (
+            candidates
+            if criterion != "refs"
+            else [c for c in candidates if c.score_refs > 0]
+        )
         ranked = sorted(
-            candidates,
+            eligible,
             key=lambda c: getattr(c, f"score_{criterion}"),
             reverse=True,
         )
@@ -312,11 +386,11 @@ def composite_score(candidates: list[Candidate], k: int = 60) -> None:
 **Configuración** (`config/scoring.yaml`, bloque `composite_score`):
 - `method: rrf` (default) | `weighted_mean` (legacy, documented for opt-in).
 - `rrf_k: 60` — constante estándar del paper original. Aumentarla suaviza, bajarla pesa más a los tops. Raramente hay que tocarla.
-- `weighted_mean` sigue disponible con `weights.{tags, semantic, queries}` por si el usuario quiere forzar calibración manual; no recomendado como default.
+- `weighted_mean` sigue disponible con `weights.{tags, semantic, queries, refs}` por si el usuario quiere forzar calibración manual; no recomendado como default.
 
-**UI complement**: el dashboard `/inbox` ordena por `score_composite DESC` pero **expone también ordenamiento por criterio individual** (tabs o filtros). Un paper con `queries=0.9` (match perfecto a una query persistente) debe poder mostrarse primero aunque RRF lo ranke medio por tener `tags` y `semantic` bajos.
+**UI complement**: el dashboard `/inbox` ordena por `score_composite DESC` pero **expone también ordenamiento por criterio individual** (tabs o filtros). Un paper con `queries=0.9` (match perfecto a una query persistente) o `refs=0.8` (overlap bibliográfico fuerte) debe poder mostrarse primero aunque RRF lo ranke medio por tener bajos los otros tres.
 
-**Calibración diferida**. RRF no necesita pesos — elimina la pregunta "¿cuánto vale tags vs semantic?". **Cuando haya ≥100 decisiones históricas** en `candidates.db` (una vez que el usuario lleve 2-3 meses de triage), un futuro ADR puede reintroducir pesos vía regresión logística sobre `score_tags, score_semantic, score_queries → {accepted, rejected}`, y comparar la precisión observada de RRF vs weighted-mean calibrado. **Calibrar escalas no es echo chamber** (el antipatrón que plan_02 §3 evita); sesgar el ranker con las aceptaciones del usuario sí lo sería — no es lo mismo. El dashboard `/metrics` ya expone `candidates_accepted / (accepted + rejected)` como precision observada por semana; esos datos son el input de la calibración futura.
+**Calibración diferida**. RRF no necesita pesos — elimina la pregunta "¿cuánto vale tags vs semantic vs refs?". **Cuando haya ≥100 decisiones históricas** en `candidates.db` (una vez que el usuario lleve 2-3 meses de triage), un futuro ADR puede reintroducir pesos vía regresión logística sobre `score_tags, score_semantic, score_queries, score_refs → {accepted, rejected}`, y comparar la precisión observada de RRF vs weighted-mean calibrado. **Calibrar escalas no es echo chamber** (el antipatrón que plan_02 §3 evita); sesgar el ranker con las aceptaciones del usuario sí lo sería — no es lo mismo. El dashboard `/metrics` ya expone `candidates_accepted / (accepted + rejected)` como precision observada por semana; esos datos son el input de la calibración futura.
 
 ---
 
@@ -367,7 +441,46 @@ def composite_score(candidates: list[Candidate], k: int = 60) -> None:
 - Por feed de origen.
 - Por semana (`published_at`).
 
-### 8.3 Autenticación
+### 8.3 Bandeja `/classics` — discovery por reference mining (ADR 020)
+
+**Propósito**: surfacear los DOIs ausentes en Zotero pero altamente citados por el corpus del usuario. Misma máquina de triage que `/inbox` (accept/reject/defer + push), distinta fuente: los candidates aparecen vía SQL sobre `Reference + ExternalPaper`, no vía RSS.
+
+**Ruta**: `/classics`. Independiente de `/inbox` (no es un filtro de la misma vista). Razón: el ranking, la ausencia de "feed source", y el modo de push (default metadata-only por ADR 022 §2.4) hacen que la UX sea distinta lo suficiente como para justificar ruta propia.
+
+**Query base** (simplificada):
+
+```sql
+SELECT
+    r.cited_doi,
+    COUNT(DISTINCT r.citing_zotero_key) AS cites_in_corpus,
+    ep.title, ep.authors_json, ep.year, ep.venue, ep.cited_by_count
+FROM reference r
+JOIN externalpaper ep ON ep.doi = r.cited_doi
+WHERE r.cited_doi IS NOT NULL
+  AND r.cited_doi NOT IN (SELECT doi FROM zotero_dois_view)
+GROUP BY r.cited_doi
+HAVING cites_in_corpus >= :k                         -- threshold k=2 default
+ORDER BY cites_in_corpus DESC, ep.cited_by_count DESC
+LIMIT :page_size OFFSET :offset;
+```
+
+**Ranking inicial v1**:
+- **Naive con filtro**: `cites_in_corpus DESC` con filtro `cited_by_count_globally ≥ 50`. Suficiente para la primera vuelta. El filtro evita ruido de papers que casualmente son citados varias veces por mi corpus pero son irrelevantes globalmente.
+- Threshold `k=2` configurable via `S2_CLASSICS_MIN_CITES_IN_CORPUS` (default 2). Si la bandeja queda con miles de entries y eso resulta abrumador, subir a `k=3` o `k=5`.
+- Filtro `cited_by_count ≥ 50` configurable via `S2_CLASSICS_MIN_GLOBAL_CITES` (default 50).
+
+**Triage**: los mismos botones accept/reject/defer de `/inbox`. Aceptar dispara push metadata-only (ADR 022): cascade silenciosa de PDF una vez, si falla queda con tags `metadata-only` + `discovered-via-refs`.
+
+**Materialization**: la query corre on-demand al render; `ExternalPaper.last_seen_at` permite refrescar metadata stale lazy (>30 días). Para corpora >5k papers donde la query empiece a tardar, materializar como vista en `candidates.db` con refresh post step-0.5.
+
+**Filtros UX**:
+- Por threshold k (slider).
+- Por venue / publisher (dropdown derivado de `ExternalPaper.venue` distinct).
+- Por año (range slider).
+
+**Métricas en `/metrics`**: cuántos classics totales hay, cuántos descubiertos por semana, ratio aceptado/descartado en `/classics` separado del `/inbox` (para detectar si la calidad del ranking está mejor o peor que el de RSS).
+
+### 8.4 Autenticación
 
 **Para v1**: ninguna. Localhost-only, el dashboard bind a `127.0.0.1:8000`.
 
@@ -395,9 +508,23 @@ async def run_fetch_cycle():
     # for deletes (S2_SAFE_DELETE_RATIO). Errors are logged but do not
     # abort the cycle — score_semantic degrades to neutral_fallback if
     # the corpus_size threshold isn't met after reconcile. See ADR 015.
+    zotero_keys = enumerate_zotero_keys(zot_client)  # shared with step 0.5
     reconcile_embeddings(zot_client, chroma_collection, openai_client,
+                         zotero_keys=zotero_keys,
                          max_per_cycle=settings.s2.max_embed_per_cycle,
                          safe_delete_ratio=settings.s2.safe_delete_ratio)
+
+    # Step 0.5 — reconcile citation graph so score_refs and /classics see
+    # fresh edges. Reuses zotero_keys from step 0; bounded by
+    # S2_MAX_REFS_FETCH_PER_CYCLE; safe-guarded by S2_SAFE_DELETE_RATIO_REFS.
+    # Captura via ADR 021 cascade (OpenAlex → HTML scraping → optional PDF).
+    # Errors per source are logged but do not abort the cycle —
+    # score_refs degrades by omission from RRF for candidates with
+    # |refs|=0 (ADR 020 §2.4).
+    reconcile_references(zot_client, refs_db_session,
+                         zotero_keys=zotero_keys,
+                         max_per_cycle=settings.s2.max_refs_fetch_per_cycle,
+                         safe_delete_ratio=settings.s2.safe_delete_ratio_refs)
 
     for feed in get_active_feeds():
         try:
@@ -418,7 +545,9 @@ async def run_fetch_cycle():
 
 **Budget**: cada candidato cuesta ~$0.0005 en embeddings + scoring. Para 30 candidates/ciclo × 4 ciclos/día × 30 días = 3600/mes → ~$2/mes. Sumar ~$0.01-0.05/ciclo de reconciliación incremental sobre la biblioteca (típicamente 0-3 items nuevos por ciclo en régimen). El backfill inicial (`zotai s2 backfill-index`) tiene su propio cap `S2_MAX_COST_USD_BACKFILL=3.00`. Ver ADR 015 §8.
 
-**Comando manual `zotai s2 reconcile`**: dispara un solo ciclo de reconciliación sin fetch de RSS — útil para debug, para forzar la propagación de un push reciente, o para usuarios que prefieren disparar el reconcile desde un cron externo independiente del worker. Usa los mismos defaults de `.env` que el ciclo del worker.
+**Comando manual `zotai s2 reconcile`**: dispara un solo ciclo de reconciliación sin fetch de RSS — útil para debug, para forzar la propagación de un push reciente, o para usuarios que prefieren disparar el reconcile desde un cron externo independiente del worker. Usa los mismos defaults de `.env` que el ciclo del worker. Por default reconcilia ambos índices (ChromaDB + citation graph); flags `--only-embeddings` y `--only-refs` permiten disparar uno solo.
+
+**Comando manual `zotai s2 backfill-references`** (ADR 020 §2.3): análogo a `backfill-index` pero para `Reference` + `ExternalPaper`. Recorre toda la biblioteca Zotero, llama la cascade de captura (ADR 021), persiste edges + cache de externos. Budget cap propio (`S2_MAX_COST_USD_BACKFILL_REFS`, default 0.00 — OpenAlex es gratis). Idempotente; re-correrlo es seguro y barato. El primer comando que el usuario corre tras el `backfill-index` para tener el citation graph poblado al arrancar el dashboard.
 
 ---
 
@@ -428,7 +557,31 @@ async def run_fetch_cycle():
 
 Se dispara cuando un candidate se marca `accepted`.
 
-**Lógica**:
+### 10.1 Dos modos de push (ADR 022)
+
+Bajo **ADR 022**, el push tiene dos modos. El default depende del `source_kind` del candidate:
+
+| Modo | Default para | Comportamiento si cascade falla |
+|---|---|---|
+| **Estándar** | `source_kind='rss'` | Tag `needs-pdf` (transitorio, retry-able sprint 3 / issue #14) |
+| **Metadata-only** | `source_kind='reference_mining'` | Tag `metadata-only` (permanente, sin retry automático) |
+
+El usuario puede forzar push metadata-only sobre un candidate RSS desde el dashboard (botón secundario "Aceptar como metadata-only") cuando sabe a priori que el paper es paywalled estable y no quiere reintentos. La opción inversa (forzar cascade exhaustiva sobre un candidate de `/classics`) no existe en v1; el modo metadata-only ya intenta la cascade silenciosa una vez, y si falla queda con la declaración de "no esperamos PDF".
+
+**Tags reservados**:
+
+| Tag | Cuándo se aplica | Permanencia |
+|---|---|---|
+| `needs-pdf` | Push estándar, cascade falló | Transitorio |
+| `metadata-only` | Push metadata-only, cascade silenciosa falló | Permanente |
+| `discovered-via-refs` | Push de un candidate con `source_kind='reference_mining'` | Permanente |
+
+`needs-pdf` y `metadata-only` son **mutuamente excluyentes** (uno declara intención de retry, el otro declara aceptación). `discovered-via-refs` es ortogonal: un classic ausente sin PDF queda con `discovered-via-refs` + `metadata-only`. Detalle de combinaciones legales en ADR 022 §2.1.
+
+**Comando manual `zotai s2 push --retry-metadata-only`**: re-intenta cascade para todos los items con tag `metadata-only`. Opt-in, no scheduled — porque el modo metadata-only es declarativo y reintentos automáticos contradicen esa declaración (y son hostiles a Sci-Hub/LibGen/Anna's). Útil para "ahora sí buscame los PDFs que faltan" después de un periodo (ej. el preprint apareció en arXiv).
+
+### 10.2 Lógica del push (ambos modos)
+
 1. Crear item en Zotero via API con metadata del candidate.
 2. Si el candidate tiene DOI o URL con PDF descargable, intentar fetch del PDF.
    Priorizar en orden (detener en primer éxito):
@@ -445,6 +598,8 @@ Se dispara cuando un candidate se marca `accepted`.
    - `S2_PDF_FETCH_MAX_MINUTES_WEEKLY` (default 20) — budget global wall-clock por semana para fetch de PDFs. Al excederlo, el worker salta el fetch y etiqueta `needs-pdf`; evita que un outage prolongado de Sci-Hub/LibGen queme tiempo del usuario. Se resetea el lunes 00:00 local.
 
    Si ninguna fuente entrega PDF dentro del budget, el item mantiene el tag `needs-pdf` y queda visible en el dashboard para retry manual.
+
+   **En modo metadata-only (ADR 022 §2.3)**: la cascade se intenta **una sola vez en silencio** — sin contar contra `S2_PDF_FETCH_MAX_MINUTES_WEEKLY`, sin loguear como falla, sin retry. Si falla, el item queda con tag `metadata-only` permanente; si tiene éxito, sin tag (el sistema ganó un PDF gratis sobre algo que se aceptó como declaradamente sin PDF).
 3. Aplicar tags derivados del scoring (los que mejor matchearon).
 4. Mover a colección "Inbox S2" en Zotero. **El push la crea on-demand e idempotentemente** — si no existe, S2 la crea; si ya existe, la usa. El nombre viene de `S2_ZOTERO_INBOX_COLLECTION` (default `Inbox S2`). No se le pide al usuario que la cree a mano.
 5. Update del candidate: `zotero_item_key`, `pushed_at`.
@@ -531,6 +686,34 @@ Mirrors fuera de servicio o saturados pueden tragarse todo el budget wall-clock 
 
 **Deliverable**: S2 listo para uso productivo del usuario.
 
+### Sprint 5 (5-7 días): Citation graph + bandeja /classics + push metadata-only
+
+**Objetivo**: aterrizan los tres ADRs 020, 021, 022. Habilita scoring por refs y el discovery de classics ausentes; el push gana modo metadata-only con tags reservados.
+
+**Pre-requisito de cierre**: el experimento **I1** de cobertura empírica (ADR 020 §5) debe correr **antes** de mergear el primer PR de código de este sprint. Toma 50-100 DOIs random de la biblioteca Zotero del usuario, mide cobertura combinada OpenAlex + HTML scraping, y reporta la distribución de `len(refs)` y el % intra-corpus. Gates:
+
+- Cobertura ≥ 80% e intra-corpus ≥ 5% → ADRs firmes, sprint procede como diseñado.
+- 60% ≤ cobertura < 80% → sprint procede; `score_refs` se trata como señal complementaria (no central) en docs y métricas.
+- Cobertura < 60% → reabrir ADR 021 y decidir sobre PDF parsing antes de continuar.
+
+**Tabla de cambios**:
+
+- [ ] Schema migration: agregar `source_kind`, `score_refs` a `Candidate`; `source_feed_id` nullable. Crear tablas `Reference` y `ExternalPaper` (alembic migration o `init_s2()` extendido).
+- [ ] `src/zotai/api/refs_scrapers/{ojs,scielo,generic}.py` — tres parsers HTML (ADR 021). Tests con fixtures HTML capturadas.
+- [ ] `src/zotai/api/openalex.py` — agregar `fetch_refs(doi)` reusando el cliente existente.
+- [ ] `src/zotai/s2/refs.py` — orchestrador de la cascade (ADR 021 §2.1).
+- [ ] `src/zotai/s2/citation_graph.py` — `reconcile_references()` análogo a `reconcile_embeddings()`. Tests con `Reference` temporal.
+- [ ] `src/zotai/s2/worker.py` — agregar step 0.5 al `run_fetch_cycle()`.
+- [ ] CLI: `zotai s2 backfill-references`, `zotai s2 reconcile-references` (y flags `--only-embeddings` / `--only-refs` en el `reconcile` existente).
+- [ ] `src/zotai/s2/scoring.py` — agregar `compute_score_refs()` y `score_refs` al composite RRF (§7.5 de este plan).
+- [ ] `src/zotai/s2/push.py` — agregar modo metadata-only (ADR 022) y los tres tags reservados. Comando `zotai s2 push --retry-metadata-only`.
+- [ ] Dashboard: ruta nueva `/classics` con triage (ADR 020 §2 + §8.3 de este plan). Filtros básicos.
+- [ ] `/metrics`: agregar `refs_*` (ADR 020 §7.2) y breakdown ranking de la bandeja.
+- [ ] Variables nuevas en `.env.example` (las seis ya están: `S2_MAX_REFS_FETCH_PER_CYCLE`, `S2_SAFE_DELETE_RATIO_REFS`, `S2_MAX_COST_USD_BACKFILL_REFS`, `S2_REFS_SCRAPING_ENABLED`, `S2_REFS_PDF_PARSING_ENABLED`, `S2_REFS_FETCH_TIMEOUT_SECONDS`).
+- [ ] Tests E2E: backfill-references → ver `Reference` poblada → bandeja /classics muestra entries → accept un classic → ve metadata-only + discovered-via-refs en Zotero.
+
+**Deliverable**: el usuario corre `zotai s2 backfill-references` después del `backfill-index`, abre el dashboard, ve la bandeja `/classics` con sus anchors ausentes, y empieza a aceptar con el tiempo. Los candidates RSS también ganan la cuarta dimensión de scoring sin esfuerzo del usuario.
+
 ---
 
 ## 12. Configuración via .env (adicional al S1)
@@ -570,6 +753,26 @@ S2_MAX_COST_USD_BACKFILL=3.00
 # en config/scoring.yaml como `query_scoring.bm25_weight`; esta env var tiene
 # prioridad para experimentación per-run. Rango útil: [0.2, 0.6].
 S2_QUERY_BM25_WEIGHT=0.4
+
+# ──────────── S2 Citation graph (ADR 020) ────────────
+# Max refs fetched per worker cycle (paso 0.5). Análogo a S2_MAX_EMBED_PER_CYCLE.
+S2_MAX_REFS_FETCH_PER_CYCLE=50
+# Safety threshold para reconciliación de refs. Mirrors S2_SAFE_DELETE_RATIO.
+S2_SAFE_DELETE_RATIO_REFS=0.10
+# Budget cap del comando one-shot `zotai s2 backfill-references`. Default 0.00
+# porque OpenAlex es gratis; slot reservado para fuentes futuras con costo.
+S2_MAX_COST_USD_BACKFILL_REFS=0.00
+
+# ──────────── S2 Refs collection cascade (ADR 021) ────────────
+# Toggle master del HTML scraping (OJS / SciELO / genérico). Setear false
+# para usar sólo OpenAlex (corpus anglo-only donde la cobertura ya es alta).
+S2_REFS_SCRAPING_ENABLED=true
+# Opt-in de PDF parsing como último recurso. No implementado v1; el flag
+# existe para que sprints futuros lo wireen (anystyle / GROBID / refextract)
+# sin nuevo ADR. Default false. Ver ADR 021 §2.
+S2_REFS_PDF_PARSING_ENABLED=false
+# Timeout por fuente del cascade (segundos).
+S2_REFS_FETCH_TIMEOUT_SECONDS=15
 
 # ──────────── S2 PDF fetch cascade ────────────
 S2_PDF_SOURCES=openaccess,doi,annas,libgen,scihub,rss
@@ -624,6 +827,7 @@ Cada una es un ticket para v1.1+.
 
 - **S1** debe haber corrido: necesitamos biblioteca poblada para que el scoring funcione y para que el primer `backfill-index` tenga material que embebera.
 - **S2 es owner de ChromaDB** (ADR 015). El primer backfill se dispara con `zotai s2 backfill-index`. Los ciclos siguientes del worker mantienen el invariante "todo item no-cuarentenado en Zotero está indexado" via reconciliación por diff. El bind mount es `:rw` (`/workspace/chroma_db` dentro del container ← `${ZOTERO_MCP_CHROMA_HOST_PATH}` en el host). Ver ADR 011 (mecanismo del mount, amended) + ADR 015 (ownership). Si el corpus indexado tiene <`semantic_scoring.min_corpus_size` documentos, `score_semantic=neutral_fallback` (default 0.5) y el dashboard sigue funcionando.
+- **S2 es también owner del citation graph** (ADR 020). Tablas `Reference` + `ExternalPaper` en `candidates.db`. El primer backfill se dispara con `zotai s2 backfill-references` después del `backfill-index`. Los ciclos siguientes mantienen el invariante "todo item no-cuarentenado en Zotero tiene refs persistidas" via reconciliación por diff (step 0.5 del worker, paralelo al de ChromaDB). Captura por cascade ADR 021 (OpenAlex → HTML scraping → PDF opcional, no v1). Si la cobertura combinada por candidate cae a 0, `score_refs` se omite del RRF (ADR 020 §2.4) sin afectar el resto del scoring. El citation graph **no se expone a S3**; sólo S2 lo consume (`score_refs` + bandeja `/classics`).
 - **S3 NO es prerequisito de S2** bajo ADR 015. S3 (`zotero-mcp serve`) es lector puro del mismo store. Si el usuario nunca configuró S3, S2 funciona igual; lo único que pierde el usuario es la consulta conversacional desde Claude Desktop.
 - **Zotero abierto** con API local (igual que S1). S2 crea la colección `Inbox S2` (o el nombre en `S2_ZOTERO_INBOX_COLLECTION`) on-demand e idempotentemente en el primer push.
 - **Worker y dashboard corriendo**: por default APScheduler in-process en el mismo container del dashboard (ADR 012). Usuarios que no mantienen el dashboard 24/7 pueden setear `S2_WORKER_DISABLED=true` y usar cron / Task Scheduler externos invocando `zotai s2 fetch-once` (receta en `docs/setup-{linux,windows}.md`); el `fetch-once` ejecuta el reconcile como paso 0 igual que el worker, así que el invariante de ChromaDB se mantiene en ambos paths.

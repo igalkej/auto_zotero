@@ -556,6 +556,7 @@ Modo `--yes` skippea confirmaciones (para CI o usuarios experimentados).
 
 Explícitamente pospuesto:
 - Indexación semántica con ChromaDB → responsabilidad de S2 (ver ADR 015). S1 no escribe a ChromaDB bajo ninguna circunstancia.
+- **Captura del grafo de citas** (refs salientes de cada paper) → responsabilidad de S2 (ver ADR 020). S1 no escribe a `Reference` ni a `ExternalPaper`. Etapa 04 sigue llamando a OpenAlex sólo para metadata bibliográfica del item; las refs las re-pide S2 en su backfill propio. La duplicación de calls (~5 min, gratis) se acepta para no romper el contrato S1/S2 disjuntas (plan_00 §3, ADR 020 §3.2).
 - Dashboard web → parte del S2.
 - Integración con Better BibTeX export → post-v1.0.
 - Detección de duplicados entre preprint/published → v1.1 si hace falta.
