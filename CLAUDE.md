@@ -203,9 +203,9 @@ S2 (write accepted items)  │
 **Reglas:**
 - No hay DB compartida entre S1 y S2 — `state.db` y `candidates.db` son disjuntas.
 - No hay API interna entre subsistemas. Si S2 necesita "saber algo" de S1, ese algo tiene que estar en Zotero (como tag, colección, o campo).
-- ChromaDB es la única excepción al "solo via Zotero": es estado derivado que S2 mantiene como índice secundario sobre Zotero. ADR 015 explica por qué S2 (no S3) es el owner. S3 lee ChromaDB para responder queries MCP; nunca escribe (`zotero-mcp update-db` no se usa en ningún flujo del proyecto).
+- ChromaDB y el citation graph (tablas `Reference` + `ExternalPaper` en `candidates.db`) son las dos excepciones al "solo via Zotero": son estado derivado que S2 mantiene como índices secundarios sobre Zotero. ADR 015 explica por qué S2 (no S3) es el owner de ChromaDB; ADR 020 aplica el mismo patrón al citation graph (`Reference` aristas, `ExternalPaper` cache de DOIs externos). En ambos, el invariante se preserva por reconciliación por diff en cada ciclo del worker. S3 lee ChromaDB para responder queries MCP; nunca escribe (`zotero-mcp update-db` no se usa en ningún flujo del proyecto). El citation graph no lo lee S3, sólo S2 (lo consume desde `score_refs` y la bandeja `/classics`).
 
-**Consecuencia**: S2 y S3 deben poder correr aunque S1 no haya corrido nunca. Degradan gracefully (S2: `score_semantic=neutral_fallback`; S3: queries devuelven vacío hasta que `zotai s2 backfill-index` corra).
+**Consecuencia**: S2 y S3 deben poder correr aunque S1 no haya corrido nunca. Degradan gracefully (S2: `score_semantic=neutral_fallback`, `score_refs` omitido del RRF cuando `|refs(c)|=0`; S3: queries devuelven vacío hasta que `zotai s2 backfill-index` corra).
 
 ---
 

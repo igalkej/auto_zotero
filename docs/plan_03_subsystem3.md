@@ -241,11 +241,21 @@ Bajo **ADR 015**, la dirección de la integración se invierte respecto a versio
 
 ---
 
+## 9.1 Items metadata-only (ADR 022)
+
+Bajo **ADR 022** los items que S2 pushea sin PDF (papers paywalled estables, classics ausentes descubiertos vía la bandeja `/classics`) son ciudadanos de primera clase del corpus. Llevan tags reservados (`metadata-only`, opcionalmente `discovered-via-refs`) pero por lo demás son items normales de Zotero.
+
+S3 los indexa **sin caso especial**: el reconcile de embeddings de S2 (ADR 015 §6) ya prevé `source ∈ {s2_fulltext, s2_abstract, s2_title_only}`; los metadata-only caen naturalmente en `s2_abstract` (cuando el abstract está disponible) o `s2_title_only` (degradación máxima, recall menor). El schema de ChromaDB no cambia. Las queries MCP desde Claude Desktop los recuperan junto con los items con PDF, distinguibles vía el campo `metadata.source` y los tags Zotero.
+
+**Recall esperado** sobre items metadata-only: aceptable para modo descubrimiento (`zotero_semantic_search` retorna por título / abstract); degradado para modo síntesis puntual (`zotero_fulltext` no tiene fulltext que extraer). El usuario debe asumir que un item con tag `metadata-only` no responde a preguntas tipo "qué dice tal sección de tal paper".
+
+---
+
 ## 10. Fuera de alcance
 
 - Custom MCP server.
 - Integración con editores (Overleaf, Jupyter, Docs).
-- Citation networks.
+- Citation networks como herramienta de exploración del usuario via MCP. **Nota**: bajo ADR 020 S2 sí mantiene un citation graph (tablas `Reference` + `ExternalPaper` en `candidates.db`) para scorear candidates y para alimentar la bandeja `/classics`, pero ese grafo no se expone a S3 — `zotero-mcp serve` no consulta `candidates.db`. Si en el futuro se quiere "preguntale a Claude qué papers de mi corpus se citan entre sí", reabrir como deliverable nuevo.
 - Cross-library queries (multi-usuario).
 - Agentic workflows (Claude decide solo cuándo consultar Zotero vs otra fuente).
 

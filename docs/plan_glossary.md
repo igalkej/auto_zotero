@@ -70,6 +70,38 @@ Proceso que corre en cada ciclo del worker como paso 0, antes del fetch de RSS y
 **Backfill de índice** (S2)
 Comando `zotai s2 backfill-index`: misma lógica de reconciliación pero con `max_per_cycle` efectivamente sin límite, progress bar, y cap de costo separado (`S2_MAX_COST_USD_BACKFILL`, default 3.00). Es el primer comando que el usuario corre tras completar S1 + setup de S3 — pobla ChromaDB inicialmente para que `score_semantic` arranque con datos. Idempotente; re-correrlo es seguro y barato.
 
+**Citation graph** (S2)
+Grafo dirigido de citas de la biblioteca, persistido en `candidates.db` (tablas `Reference` y `ExternalPaper`). S2 es owner (ADR 020), S1 no escribe. `Reference(citing_zotero_key, cited_doi, cited_openalex_id, cited_text, source_api, fetched_at)` representa aristas; `ExternalPaper(doi, openalex_id, title, authors_json, ...)` cachea metadata de DOIs ausentes en Zotero pero citados por papers en él. Mantenido por reconciliación por diff en step 0.5 del worker (paralelo al de embeddings). Consumido por `score_refs` (4ta señal RRF, §7.4) y por la bandeja `/classics` (§8.3).
+
+**Anchor papers** (S2)
+DOIs externos a Zotero citados por k≥2 papers de la biblioteca del usuario. Equivale a "los clásicos del campo del usuario que aún no están en su biblioteca". Forman el contenido principal de la bandeja `/classics`. Threshold k configurable; default `k=2`.
+
+**Reference mining** (S2)
+Proceso de descubrir candidates a partir del citation graph, no de RSS. Los DOIs en `ExternalPaper` ordenados por frecuencia de cita en el corpus (`COUNT(DISTINCT citing_zotero_key)`) y filtrados por `cited_by_count_globally ≥ 50` constituyen el feed de la bandeja `/classics`. Equivalente operacional al fetch RSS pero con `source_kind='reference_mining'` en `Candidate`.
+
+**Bandeja /classics** (S2)
+Ruta del dashboard de S2 que expone `Candidate`s con `source_kind='reference_mining'`. Triage idéntico a `/inbox` (accept/reject/defer + push) pero ranking por `cites_in_my_corpus DESC` con filtro `global_cited_by_count ≥ 50`. Push de items aceptados es metadata-only por default (ADR 022 §2.4) — el cascade silencioso una vez intenta PDF, si falla queda con tags `metadata-only` + `discovered-via-refs`.
+
+**Refs cascade** (S2)
+Pipeline de captura de refs definido en ADR 021: OpenAlex (`referenced_works`) → HTML scraping (OJS / SciELO / genérico) → PDF parsing (opt-in detrás de flag, no implementado v1). Primer hit gana; cada nivel devuelve `[]` si no aplica, nunca raise. `Reference.source_api` registra qué nivel produjo cada arista para auditabilidad.
+
+**OJS scraper / SciELO HTML scraper / genérico** (S2)
+Tres parsers HTML aislados en `src/zotai/api/refs_scrapers/{ojs,scielo,generic}.py`, parte de la cascade de ADR 021. OJS cubre revistas en plataforma PKP (dominante en LATAM); SciELO cubre la HTML view distinta de OJS; el genérico es best-effort sobre JSON-LD + heurística DOM. Falla de un parser devuelve `[]` y la cascade sigue.
+
+**Score por refs / `score_refs`** (S2)
+Cuarta señal del RRF (ADR 016), incorporada por ADR 020. `score_refs(c) = |refs(c) ∩ zotero_dois| / |refs(c)|` con `refs(c)` obtenido vía la cascade ADR 021. Si `|refs(c)| = 0` el score se omite del RRF (ADR 020 §2.4) — no penaliza, simplemente no contribuye al ranking de ese criterio.
+
+**Push estándar / push metadata-only** (S2, ADR 022)
+Dos modos del push de S2 a Zotero. Estándar: cascade exhaustiva de PDF (issue #14, sprint 3); si falla, tag `needs-pdf` para retry. Metadata-only: cascade silenciosa una sola vez; si falla, tag `metadata-only` permanente, sin retry. Default por `source_kind` del candidate: `'rss'` → estándar; `'reference_mining'` → metadata-only.
+
+**Tags reservados del sistema** (S2, ADR 022)
+Tres tags ortogonales que S2 aplica a items pusheados a Zotero:
+- `needs-pdf`: cascade falló transitoriamente; transitorio, retry-able.
+- `metadata-only`: aceptado deliberadamente sin expectativa de PDF; permanente.
+- `discovered-via-refs`: origen bandeja /classics (no RSS); permanente.
+
+`needs-pdf` y `metadata-only` son mutuamente excluyentes; `discovered-via-refs` es ortogonal a los otros dos. Combinaciones legales documentadas en ADR 022 §2.1.
+
 **Clasificador académico / no-académico** (S1 Etapa 01)
 Filtro upstream del pipeline S1. Decide, para cada PDF encontrado bajo `PDF_SOURCE_FOLDERS`, si es material bibliográfico o material de descarte (facturas, DNIs, tickets, manuales, etc.). Estrategia híbrida en 3 ramas: (1) **accept** automático por heurística positiva — DOI / arXiv / ISBN / keywords académicos en páginas 1-3; (2) **reject** automático por heurística negativa — ≤2 páginas + ausencia de texto o keywords de facturación en primera página; (3) **ambiguos** resueltos por `gpt-4o-mini` con prompt corto. Ver `plan_01_subsystem1.md` §3 Etapa 01 y §3.1.
 
